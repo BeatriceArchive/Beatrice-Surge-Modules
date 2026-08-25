@@ -1,0 +1,43 @@
+#!name=贝蒂的 Surge 托管设置
+#!desc=Surge 托管配置系统覆盖：VIF 接管、防泄漏与网络行为调整
+#!system=ios
+
+[General]
+
+# ===== DNS / 本地映射 =====
+use-local-host-item-for-proxy = false
+
+# ===== 接管模式 =====
+# 仅使用 Surge VIF 虚拟网卡接管
+compatibility-mode = 3
+
+# ===== IPv6 =====
+ipv6 = false
+ipv6-vif = disabled
+
+# ===== 网络优化 =====
+wifi-assist = false
+all-hybrid = false
+udp-priority = true
+
+# ===== Wi-Fi / 热点代理共享 =====
+allow-wifi-access = false
+allow-hotspot-access = false
+
+# ===== VIF 接管范围 =====
+include-all-networks = true
+include-local-networks = false
+include-apns = false
+include-cellular-services = false
+
+# ===== 系统代理兼容 =====
+exclude-simple-hostnames = true
+
+# ===== LAN 安全 =====
+proxy-restricted-to-lan = true
+
+# ===== ICMP / Ping =====
+icmp-forwarding = false
+
+# ===== 日志 =====
+loglevel = notify
