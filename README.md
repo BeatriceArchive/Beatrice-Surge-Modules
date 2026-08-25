@@ -24,11 +24,11 @@ https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Mo
 
 贝蒂的哔哩哔哩每日签到。
 
-每天 08:00 自动完成哔哩哔哩每日等级经验任务，也可在 Surge 中刷新“贝蒂的哔哩哔哩每日签到”Panel 立即手动执行。自动与手动入口共用同一套任务逻辑和带 TTL 的本地运行锁：脚本会先读取当日状态，只补做未完成项目；投币按当日已获得的投币经验与当前整数余额计算，硬币不足时有多少投多少。
+每天 08:00 自动完成哔哩哔哩每日等级经验任务，也可在 Surge 中刷新“贝蒂的哔哩哔哩每日签到”Panel 立即手动执行。自动与手动入口共用同一套任务逻辑和带 TTL 的本地运行锁：脚本会先读取当日状态，只补做未完成项目；投币按当日已获得的投币经验与当前整数余额计算，硬币不足时有多少投多少，每次只投 1 枚且不会附带点赞。
 
-日常模块本身没有 Cookie 监听或 MITM，不会常驻抓取 Cookie。首次使用、Cookie 失效或需要手动更新时，安装 `Betty-Bilibili-Cookie.sgmodule`，在 Surge 中找到“贝蒂的哔哩哔哩 Cookie 获取”Panel，手动点击刷新运行；随后轻触通知打开 Bilibili 官方登录确认页面并完成登录，收到“✅ Cookie 已保存”后 Daily 即可使用。Cookie 不会自动获取。
+Daily 只接受当前 Cookie 工具明确验证过的新会话。首次使用、Cookie 失效或需要更新时，刷新“贝蒂的哔哩哔哩 Cookie 获取”Panel：刷新会先清空旧 Cookie、旧验证标记和旧 Panel 状态，再向 Bilibili 官方 Web 二维码接口申请一张全新的登录二维码。二维码内容直接使用官方接口返回的 `data.url`，仅在本机编码为图片，不上传到第三方二维码服务；扫码确认成功后读取官方登录响应 Cookie、访问一次 Bilibili 主站补全会话，并通过 `/x/web-interface/nav` 验证账号后才保存到 Surge 本地。
 
-两个 Panel 均没有自动刷新配置。Cookie Generic Script 只有在用户手动点击 Cookie Panel 时才会请求 Bilibili 官方登录接口；Daily 除每天 08:00 的原定 cron 外，也只会在用户手动刷新 Daily Panel 时额外执行。Cookie 工具不使用 MITM、CA 或 HTTPS 解密，不需要修改托管配置，也不需要创建本地配置副本。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
+Cookie 获取不使用 MITM、CA 或 HTTPS 解密，也不会通过打开 Bilibili App、网络变化或 Profile 更新自动触发。Panel 的自动刷新只读取 Surge 本地状态，不访问 Bilibili；Daily 除每天 08:00 的 cron 外，只会在用户手动刷新 Daily Panel 时额外执行。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
 
 Surge 当前官方 Panel 语法没有跨模块全局排序字段，因此 Bilibili 面板与基础面板的显示顺序主要由用户本地模块顺序决定。
 

@@ -1,12 +1,12 @@
 #!name=贝蒂的哔哩哔哩 Cookie 获取
-#!desc=手动刷新时先清空旧 Cookie 与旧状态，再创建全新的 Bilibili 官方二维码登录事务；仅在新会话通过登录验证后保存。无需 MITM、CA 或 HTTPS 解密。
+#!desc=手动刷新即清空旧会话并创建全新的 Bilibili 官方 Web 二维码登录事务；二维码在本机生成，扫码成功后补全主站会话并验证后保存。无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.3.3
+# Version: 1.4.0
 # Project: Betty-Bilibili-Daily
 
 [Panel]
-贝蒂的哔哩哔哩 Cookie 获取 = title="贝蒂的哔哩哔哩 Cookie 获取",content="点击刷新清空旧状态并生成全新官方二维码",icon=key.fill,icon-color="#8E8E93",script-name=Betty-Bilibili-Cookie,update-interval=5
+贝蒂的哔哩哔哩 Cookie 获取 = title="贝蒂的哔哩哔哩 Cookie 获取",content="点击刷新清空旧状态并生成全新官方二维码",icon=key.fill,icon-color="#8E8E93",script-name=Betty-Bilibili-Cookie,update-interval=10
 
 [Script]
 Betty-Bilibili-Cookie = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,timeout=180,script-update-interval=60

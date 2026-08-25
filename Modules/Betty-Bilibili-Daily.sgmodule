@@ -1,13 +1,13 @@
 #!name=贝蒂的哔哩哔哩每日签到
-#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务。自动与手动共用同一逻辑和运行锁。
+#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务；只接受 Cookie 工具当前版本验证过的新会话，自动与手动共用同一逻辑和运行锁。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.3.0
+# Version: 1.4.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 
 [Panel]
-贝蒂的哔哩哔哩每日签到 = title="贝蒂的哔哩哔哩每日签到",content="每天 08:00 自动执行｜点击刷新立即运行",icon=calendar.badge.checkmark,icon-color="#8E8E93",script-name=Betty-Bilibili-Daily-Panel,update-interval=1
+贝蒂的哔哩哔哩每日签到 = title="贝蒂的哔哩哔哩每日签到",content="每天 08:00 自动执行｜点击刷新立即运行",icon=calendar.badge.checkmark,icon-color="#8E8E93",script-name=Betty-Bilibili-Daily-Panel,update-interval=15
 
 [Script]
 Betty-Bilibili-Daily = type=cron,cronexp="0 8 * * *",script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,wake-system=true,timeout=90,script-update-interval=60
