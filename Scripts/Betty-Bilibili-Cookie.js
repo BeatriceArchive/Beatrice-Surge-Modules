@@ -1,16 +1,17 @@
 /*
  * Betty-Bilibili-Cookie
  * 贝蒂的哔哩哔哩 Cookie 获取
- * Version: 1.2.0
+ * Version: 1.2.1
  * Runtime: Surge Generic Script
  *
- * 仅在用户手动运行时，通过 Bilibili 官方登录接口创建一次登录事务。
+ * 仅在用户手动刷新 Panel 或手动运行脚本时，通过 Bilibili 官方登录接口创建一次登录事务。
  * 登录确认、状态轮询、Cookie 验证与本地保存均不依赖 MITM 或 HTTPS 解密。
  */
 
 const NAME = "贝蒂的哔哩哔哩 Cookie 获取";
 const COOKIE_KEY = "betty.bilibili.cookie";
 const INVALID_NOTICE_KEY = "betty.bilibili.cookie.invalid_notice";
+const RUN_LOCK_KEY = "betty.bilibili.cookie.run_lock";
 
 const QR_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate";
 const QR_POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll";
@@ -24,6 +25,9 @@ const POLL_INTERVAL_MS = 3000;
 const MAX_POLL_DURATION_MS = 110000;
 const MAX_POLL_REQUESTS = 38;
 const MAX_CONSECUTIVE_POLL_ERRORS = 3;
+const RUN_LOCK_TTL_MS = 180000;
+const LOCK_CONFIRM_DELAY_MS = 120;
+const LOCK_CONFIRM_ROUNDS = 2;
 
 const UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 const REQUIRED_ACCOUNT_COOKIES = ["SESSDATA", "bili_jct", "DedeUserID"];
@@ -43,11 +47,24 @@ COOKIE_ORDER.forEach(function (name) {
 });
 
 let doneCalled = false;
+let runLockOwner = "";
+let runLockHeld = false;
+let finalPanelResult = {
+  title: NAME,
+  content: "点击刷新，手动运行 Bilibili 官方登录工具",
+  style: "info"
+};
 
 run();
 
 async function run() {
   try {
+    if (isAutomaticPanelInvocation()) {
+      console.log("[Betty-Bilibili-Cookie] Automatic panel invocation ignored");
+      return;
+    }
+
+    await acquireRunLock();
     console.log("[Betty-Bilibili-Cookie] Official login started");
 
     const transaction = await createLoginTransaction();
@@ -98,25 +115,47 @@ async function run() {
       : "Cookie 已保存到 Surge 本地，可供每日签到模块使用。";
     const resetText = noticeReset ? "" : " Cookie 已保存，但失效提醒状态重置失败。";
 
+    finalPanelResult = {
+      title: "✅ Cookie 已保存",
+      content: "Cookie 已保存到 Surge 本地" + resetText,
+      style: "good"
+    };
     $notification.post(NAME, "✅ Cookie 已保存", resultText + resetText);
     console.log("[Betty-Bilibili-Cookie] Official login completed");
   } catch (error) {
     const safeError = normalizeFailure(error);
+    finalPanelResult = {
+      title: "❌ 获取失败",
+      content: safeError.title + "：" + safeError.body,
+      style: "error"
+    };
     console.log("[Betty-Bilibili-Cookie] Failed: " + safeError.logCode);
     $notification.post(NAME, "❌ " + safeError.title, safeError.body);
   } finally {
-    doneOnce();
+    releaseRunLock();
+    doneOnce(finalPanelResult);
   }
 }
 
 async function createLoginTransaction() {
-  const result = await readJsonWithRetry({
+  const result = await requestJson({
     url: QR_GENERATE_URL,
     headers: commonHeaders(),
     timeout: REQUEST_TIMEOUT,
     "auto-cookie": false,
     "auto-redirect": false
-  }, "二维码申请");
+  });
+
+  if (!result.ok) {
+    const statusText = result.kind === "http"
+      ? "（HTTP " + safeStatusCode(result.status) + "）"
+      : "";
+    throw failure(
+      "二维码申请失败",
+      "无法创建 Bilibili 官方登录事务" + statusText + "，请稍后重新执行。",
+      "qr_generate_request_failed"
+    );
+  }
 
   const body = result.body;
   if (responseCode(body) !== 0 || !body.data) {
@@ -500,8 +539,98 @@ function normalizeFailure(error) {
   };
 }
 
-function doneOnce() {
+async function acquireRunLock() {
+  const now = Date.now();
+  const existing = readRunLock();
+  if (existing && existing.expiresAt > now) {
+    throw failure(
+      "任务正在运行",
+      "已有一次 Cookie 获取流程正在运行，请等待其结束或三分钟后重试。",
+      "run_locked"
+    );
+  }
+
+  const owner = createRunLockOwner();
+  const lockValue = JSON.stringify({
+    owner: owner,
+    expiresAt: now + RUN_LOCK_TTL_MS
+  });
+  if (!$persistentStore.write(lockValue, RUN_LOCK_KEY)) {
+    throw failure(
+      "运行锁创建失败",
+      "Surge 本地持久化存储暂时不可用，请稍后重试。",
+      "run_lock_store_failed"
+    );
+  }
+
+  for (let round = 0; round < LOCK_CONFIRM_ROUNDS; round += 1) {
+    await delay(LOCK_CONFIRM_DELAY_MS);
+    const confirmed = readRunLock();
+    if (!confirmed || confirmed.owner !== owner || confirmed.expiresAt <= Date.now()) {
+      throw failure(
+        "任务正在运行",
+        "另一次 Cookie 获取流程已先开始，请等待其结束后重试。",
+        "run_lock_contended"
+      );
+    }
+  }
+
+  runLockOwner = owner;
+  runLockHeld = true;
+}
+
+function releaseRunLock() {
+  if (!runLockHeld || !runLockOwner) return;
+
+  const current = readRunLock();
+  if (current && current.owner === runLockOwner) {
+    let released = $persistentStore.write(null, RUN_LOCK_KEY);
+    if (!released) {
+      released = $persistentStore.write("", RUN_LOCK_KEY);
+    }
+  }
+
+  runLockHeld = false;
+  runLockOwner = "";
+}
+
+function readRunLock() {
+  const stored = $persistentStore.read(RUN_LOCK_KEY);
+  if (!stored) return null;
+
+  try {
+    const parsed = JSON.parse(stored);
+    const owner = parsed && typeof parsed.owner === "string" ? parsed.owner : "";
+    const expiresAt = parsed ? Number(parsed.expiresAt) : NaN;
+    if (!owner || owner.length > 80 || !Number.isFinite(expiresAt)) return null;
+    return { owner: owner, expiresAt: expiresAt };
+  } catch (_) {
+    return null;
+  }
+}
+
+function createRunLockOwner() {
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 14);
+}
+
+function isPanelInvocation() {
+  return typeof $input === "object"
+    && $input
+    && $input.purpose === "panel";
+}
+
+function isAutomaticPanelInvocation() {
+  return isPanelInvocation()
+    && typeof $trigger === "string"
+    && $trigger === "auto-interval";
+}
+
+function doneOnce(panelResult) {
   if (doneCalled) return;
   doneCalled = true;
-  $done();
+  if (isPanelInvocation()) {
+    $done(panelResult);
+  } else {
+    $done();
+  }
 }
