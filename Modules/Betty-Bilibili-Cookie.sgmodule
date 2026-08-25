@@ -1,12 +1,12 @@
 #!name=贝蒂的哔哩哔哩 Cookie 获取
-#!desc=通过 Surge Panel 手动运行 Bilibili 官方登录工具，将有效 Cookie 保存到 Surge 本地。无需 MITM、CA 或 HTTPS 解密。
+#!desc=通过 Surge Panel 手动创建 Bilibili 官方二维码登录事务；二维码仅在本机生成，登录成功后补全主站会话并将 Cookie 保存到 Surge 本地。无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.2.2
+# Version: 1.3.0
 # Project: Betty-Bilibili-Daily
 
 [Panel]
-贝蒂的哔哩哔哩 Cookie 获取 = title="贝蒂的哔哩哔哩 Cookie 获取",content="Cookie 状态待检测｜点击刷新获取或更新",icon=key.fill,icon-color="#8E8E93",script-name=Betty-Bilibili-Cookie
+贝蒂的哔哩哔哩 Cookie 获取 = title="贝蒂的哔哩哔哩 Cookie 获取",content="未检测到有效 Cookie｜点击刷新开始官方扫码登录",icon=key.fill,icon-color="#8E8E93",script-name=Betty-Bilibili-Cookie,update-interval=1
 
 [Script]
-Betty-Bilibili-Cookie = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,timeout=150
+Betty-Bilibili-Cookie = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,timeout=180,script-update-interval=60
