@@ -1,5 +1,5 @@
-/* Betty-Bilibili-Cookie v1.3.1 | Surge */
-const NAME="贝蒂的哔哩哔哩 Cookie 获取",VER="1.3.1";
+/* Betty-Bilibili-Cookie v1.3.2 | Surge */
+const NAME="贝蒂的哔哩哔哩 Cookie 获取",VER="1.3.2";
 const CK="betty.bilibili.cookie",META="betty.bilibili.cookie.meta",BAD="betty.bilibili.cookie.invalid_notice",LOCK="betty.bilibili.cookie.run_lock";
 const GEN="https://passport.bilibili.com/x/passport-login/web/qrcode/generate",POLL="https://passport.bilibili.com/x/passport-login/web/qrcode/poll",HOME="https://www.bilibili.com/",SPI="https://api.bilibili.com/x/frontend/finger/spi",NAV="https://api.bilibili.com/x/web-interface/nav";
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
@@ -18,7 +18,14 @@ async function main(){try{
  panel=P("✅ Cookie 已保存｜官方扫码登录 + 主站会话已补全","key.fill","#34C759");$notification.post(NAME,"✅ Cookie 已保存","Bilibili 官方扫码登录完成，会话已补全并保存到 Surge 本地。");
 }catch(e){const x=norm(e);panel=P("❌ "+x.title+"｜点击刷新重新获取","xmark.circle.fill","#FF3B30");console.log("[Betty-Bilibili-Cookie] "+x.code);$notification.post(NAME,"❌ "+x.title,x.body)}}
 function localPanel(){const c=$persistentStore.read(CK),b=$persistentStore.read(BAD);if(b)return P("❌ Cookie 已标记失效｜点击刷新重新扫码","key.slash.fill","#FF3B30");if(c&&hasNeed(c))return P("✅ Cookie 已保存｜点击刷新可重新扫码更新","key.fill","#34C759");return P("点击刷新生成官方登录二维码｜不会打开浏览器","key.fill","#8E8E93")}
-async function transaction(){const r=await get(GEN,"",false),b=r.body;if(!b||code(b)!==0||!b.data)throw E("二维码申请失败","Bilibili 未能创建官方登录事务。","qr_generate");const key=String(b.data.qrcode_key||""),url=String(b.data.url||"");if(!/^[a-f0-9]{32}$/i.test(key)||!/^https:\/\/passport\.bilibili\.com\//.test(url)||url.indexOf(key)<0)throw E("二维码申请失败","Bilibili 返回的登录事务格式异常。","qr_invalid");return{key,url}}
+async function transaction(){
+ const r=await get(GEN,"",false),b=r.body;
+ if(!b||code(b)!==0||!b.data)throw E("二维码申请失败","Bilibili 未能创建官方登录事务。","qr_generate");
+ const key=String(b.data.qrcode_key||"").trim(),url=String(b.data.url||"").trim();
+ if(key.length!==32||/[\s&?=#/]/.test(key))throw E("二维码申请失败","Bilibili 返回的登录密钥格式异常。","qr_key_invalid");
+ if(!/^https:\/\/passport\.bilibili\.com(?:\/|$)/i.test(url))throw E("二维码申请失败","Bilibili 返回的二维码地址不是官方登录地址。","qr_url_invalid");
+ return{key,url}
+}
 function notifyQR(t){let q="";try{q=qr64(t.url)}catch(_){q=""}if(!q)throw E("二维码生成失败","无法在本机生成 Bilibili 登录二维码，请重新点击刷新。","qr_render");$notification.post(NAME,"二维码已生成｜长按查看","同机：长按通知查看二维码并截图，然后打开 Bilibili → 扫一扫 → 相册，选择截图并确认登录。此通知不会打开浏览器。",{"media-base64":q,"media-base64-mime":"image/png",sound:true})}
 async function waitLogin(key){const start=Date.now();let errs=0;for(let i=0;i<50&&Date.now()-start<150000;i++){if(i)await sleep(3000);const r=await req(POLL+"?qrcode_key="+encodeURIComponent(key),"",false,true);if(!r.ok){if(++errs>=3)throw E("网络连接失败","连续多次无法查询 Bilibili 登录状态。","poll_network");continue}errs=0;const b=r.body;if(!b||code(b)!==0||!b.data)throw E("登录状态异常","Bilibili 返回了无法识别的扫码状态。","poll_api");const s=Number(b.data.code);if(s===86101||s===86090)continue;if(s===86038)throw E("二维码已过期","请重新点击 Cookie Panel 获取新的二维码。","qr_expired");if(s!==0)throw E("登录状态异常","Bilibili 返回状态码 "+s+"。","poll_status");const m=cookies(r.headers,b.data.url);if(["SESSDATA","bili_jct","DedeUserID"].some(k=>!m[k]))throw E("Cookie 不完整","扫码成功，但 Bilibili 未返回完整账号 Cookie。","login_cookie");return m}throw E("登录等待超时","未在等待时间内完成扫码确认，请重新获取二维码。","qr_timeout")}
 async function homeMerge(map){const r=await req(HOME,serialize(map),true,true,false);if(!r.ok)return map;return Object.assign(map,cookies(r.headers,""))}
