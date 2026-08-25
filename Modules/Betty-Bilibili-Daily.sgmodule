@@ -2,7 +2,7 @@
 #!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.2.0
+# Version: 1.2.1
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule 的手动 Panel。
 

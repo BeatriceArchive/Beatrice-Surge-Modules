@@ -1,7 +1,7 @@
 /*
  * Betty-Bilibili-Daily
  * 贝蒂的哔哩哔哩每日签到
- * Version: 1.2.0
+ * Version: 1.2.1
  * Runtime: Surge
  *
  * 功能：每日登录/观看/分享/投币经验任务。
@@ -9,7 +9,7 @@
  */
 
 const NAME = "贝蒂的哔哩哔哩每日签到";
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 const COOKIE_KEY = "betty.bilibili.cookie";
 const INVALID_NOTICE_KEY = "betty.bilibili.cookie.invalid_notice";
 const RUN_LOCK_KEY = "betty.bilibili.daily.run_lock";
@@ -388,7 +388,7 @@ async function completeWatch(candidates, uid, csrf, cookie) {
     if (!video) continue;
 
     const ret = await watchVideo(video, uid, csrf, cookie);
-    const stopReason = classifyStopReason(ret);
+    const stopReason = classifyStopReason(ret, "观看");
     if (stopReason) return { success: false, stopReason: stopReason };
 
     if (responseCode(ret) === 0) {
@@ -460,7 +460,7 @@ async function shareOneVideo(candidates, csrf, cookie) {
       cookie,
       "https://www.bilibili.com/video/" + candidate.bvid
     );
-    const stopReason = classifyStopReason(ret);
+    const stopReason = classifyStopReason(ret, "分享");
     if (stopReason) return { success: false, stopReason: stopReason };
 
     if (responseCode(ret) === 0) {
@@ -522,7 +522,7 @@ async function spendCoins(candidates, target, startCoinCount, csrf, cookie) {
     if (accountedSpend >= target || coinCount >= MAX_DAILY_COINS) break;
 
     let ret = await addCoin(candidate.bvid, csrf, cookie);
-    let stopReason = classifyStopReason(ret);
+    let stopReason = classifyStopReason(ret, "投币");
     if (stopReason) {
       return {
         accountedSpend: accountedSpend,
@@ -534,7 +534,7 @@ async function spendCoins(candidates, target, startCoinCount, csrf, cookie) {
     if (responseCode(ret) === 34004) {
       await wait(1000);
       ret = await addCoin(candidate.bvid, csrf, cookie);
-      stopReason = classifyStopReason(ret);
+      stopReason = classifyStopReason(ret, "投币");
       if (stopReason) {
         return {
           accountedSpend: accountedSpend,
@@ -582,7 +582,7 @@ async function getVideoCoinCount(bvid, cookie) {
     cookie,
     0
   );
-  const stopReason = classifyStopReason(body);
+  const stopReason = classifyStopReason(body, "投币前检查");
   if (stopReason) return { count: null, stopReason: stopReason };
   if (!body || responseCode(body) !== 0 || !body.data) {
     return { count: null, stopReason: "" };
@@ -729,29 +729,52 @@ function responseCode(body) {
   return code === null ? null : code;
 }
 
-function classifyStopReason(body) {
+function classifyStopReason(body, stage) {
   const code = responseCode(body);
-  if (code === -101 || code === -111) return "cookie";
-  if (code === -102 || code === -403 || code === 403) return "account";
-  return "";
+  let type = "";
+  if (code === -101 || code === -111) {
+    type = "cookie";
+  } else if (code === -102 || code === -403 || code === 403) {
+    type = "account";
+  } else {
+    return "";
+  }
+
+  return {
+    type: type,
+    stage: cleanText(stage || "未知阶段", 40),
+    code: code,
+    message: cleanText(body && (body.message || body.msg) || "B站拒绝了请求", 120)
+  };
 }
 
 function notifyStopReason(reason) {
-  if (reason === "cookie") {
+  const type = reason && reason.type ? reason.type : "account";
+  const stage = cleanText(reason && reason.stage || "未知阶段", 40);
+  const codeText = reason && reason.code !== null && reason.code !== undefined
+    ? String(reason.code)
+    : "未知";
+  const message = cleanText(reason && reason.message || "B站拒绝了请求", 120);
+  const detail = "阶段：" + stage + "\ncode：" + codeText + "\nmessage：" + message;
+
+  log("Request stopped at " + stage + " code=" + codeText + " message=" + message);
+
+  if (type === "cookie") {
     finalPanelResult = makePanelResult(
-      "❌ 无法执行｜Cookie 已失效，请先重新获取",
+      "❌ " + stage + "失败｜code " + codeText + "，请重新获取 Cookie",
       "xmark.circle.fill",
       "#FF3B30"
     );
-    notifyInvalidCookieOncePerDay("任务接口返回未登录或 CSRF 校验失败");
+    notifyInvalidCookieOncePerDay(detail);
     return;
   }
+
   finalPanelResult = makePanelResult(
-    "❌ 执行失败｜账号状态异常",
+    "❌ " + stage + "被拒绝｜code " + codeText,
     "xmark.circle.fill",
     "#FF3B30"
   );
-  notify("账号状态异常", "B站拒绝了账号操作，本次已停止后续写入任务。");
+  notify("B站请求被拒绝", detail + "\n已停止后续写入任务。");
 }
 
 function notifyInvalidCookieOncePerDay(reason) {
