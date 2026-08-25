@@ -1,0 +1,10 @@
+#!name=贝蒂的哔哩哔哩每日签到
+#!desc=每天 08:00 自动完成 B 站登录、观看、分享与最多 5 枚投币经验任务。Cookie 仅从 Surge 本地读取，不常驻抓取。
+#!author=BeatriceArchive
+#!category=Beatrice
+# Version: 1.0.0
+# Project: Betty-Bilibili-Daily
+# Cookie 获取请使用独立临时模块 Betty-Bilibili-Cookie.sgmodule，成功后即可删除。
+
+[Script]
+Betty-Bilibili-Daily = type=cron,cronexp="0 8 * * *",script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,wake-system=true,timeout=60,script-update-interval=86400
