@@ -2,11 +2,11 @@
 #!desc=临时捕获一次有效 B 站 Cookie 并保存到 Surge 本地。抓取成功后请删除/停用本模块，日常签到无需常驻 MITM。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.0.0
+# Version: 1.1.0
 # Project: Betty-Bilibili-Daily
 
 [Script]
-Betty-Bilibili-Cookie = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\/x\/resource\/fingerprint(?:\?|$),script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,requires-body=0,timeout=15,script-update-interval=86400
+Betty-Bilibili-Cookie = type=http-request,pattern=^https:\/\/app\.bilibili\.com\/x\/resource\/fingerprint(?:\?|$),script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,requires-body=false,timeout=15,script-update-interval=86400
 
 [MITM]
 hostname = %APPEND% app.bilibili.com

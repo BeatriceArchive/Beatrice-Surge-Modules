@@ -24,9 +24,9 @@ https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Mo
 
 贝蒂的哔哩哔哩每日签到。
 
-每天 08:00 自动完成哔哩哔哩每日等级经验任务：登录、观看、分享，以及最多投 5 枚硬币；硬币不足时按当前可用余额投币，不超过 5 枚。
+每天 08:00 自动完成哔哩哔哩每日等级经验任务：登录、观看、分享，以及最多投 5 枚硬币。脚本会先读取当日状态，只补做未完成项目；投币按当日已获得的投币经验与当前整数余额计算，硬币不足时有多少投多少。
 
-日常模块不会常驻抓取 Cookie。首次使用或 Cookie 失效、需要手动更新时，临时安装 `Betty-Bilibili-Cookie.sgmodule`，抓取成功后即可删除/停用 Cookie 获取模块。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库。
+日常模块本身没有 Cookie 监听或 MITM，不会常驻抓取 Cookie。首次使用或 Cookie 失效、需要手动更新时，临时安装 `Betty-Bilibili-Cookie.sgmodule`，抓取成功后建议立即删除/停用 Cookie 获取模块。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库。
 
 签到模块安装地址：
 
