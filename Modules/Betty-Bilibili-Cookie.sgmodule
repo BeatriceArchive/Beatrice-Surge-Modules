@@ -2,7 +2,7 @@
 #!desc=通过 Surge Panel 手动创建 Bilibili 官方二维码登录事务；二维码仅在本机生成并显示，不再打开浏览器。扫码成功后补全主站会话并将 Cookie 保存到 Surge 本地。无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.3.1
+# Version: 1.3.2
 # Project: Betty-Bilibili-Daily
 
 [Panel]
