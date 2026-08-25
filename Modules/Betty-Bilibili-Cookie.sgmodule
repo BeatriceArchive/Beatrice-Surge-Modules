@@ -1,12 +1,9 @@
 #!name=贝蒂的哔哩哔哩 Cookie 获取
-#!desc=临时捕获一次有效 B 站 Cookie 并保存到 Surge 本地。抓取成功后请删除/停用本模块，日常签到无需常驻 MITM。
+#!desc=手动运行 Bilibili 官方登录工具，将有效 Cookie 保存到 Surge 本地。无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.1.0
+# Version: 1.2.0
 # Project: Betty-Bilibili-Daily
 
 [Script]
-Betty-Bilibili-Cookie = type=http-request,pattern=^https:\/\/app\.bilibili\.com\/x\/resource\/fingerprint(?:\?|$),script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,requires-body=false,timeout=15,script-update-interval=86400
-
-[MITM]
-hostname = %APPEND% app.bilibili.com
+Betty-Bilibili-Cookie = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,timeout=150,script-update-interval=86400
