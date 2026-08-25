@@ -1,23 +1,35 @@
-/* Betty-Bilibili-Cookie v1.3.2 | Surge */
-const NAME="贝蒂的哔哩哔哩 Cookie 获取",VER="1.3.2";
-const CK="betty.bilibili.cookie",META="betty.bilibili.cookie.meta",BAD="betty.bilibili.cookie.invalid_notice",LOCK="betty.bilibili.cookie.run_lock";
+/* Betty-Bilibili-Cookie v1.3.3 | Surge */
+const NAME="贝蒂的哔哩哔哩 Cookie 获取",VER="1.3.3";
+const CK="betty.bilibili.cookie",META="betty.bilibili.cookie.meta",BAD="betty.bilibili.cookie.invalid_notice",LOCK="betty.bilibili.cookie.run_lock",STATE="betty.bilibili.cookie.panel_state";
 const GEN="https://passport.bilibili.com/x/passport-login/web/qrcode/generate",POLL="https://passport.bilibili.com/x/passport-login/web/qrcode/poll",HOME="https://www.bilibili.com/",SPI="https://api.bilibili.com/x/frontend/finger/spi",NAV="https://api.bilibili.com/x/web-interface/nav";
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 const NEED=["SESSDATA","bili_jct","DedeUserID","buvid3"],ORDER=["SESSDATA","bili_jct","DedeUserID","DedeUserID__ckMd5","sid","buvid3","buvid4","b_nut","b_lsid","_uuid","buvid_fp"];
-let done=false,owner="",held=false,panel=localPanel();
-main().finally(()=>{unlock();finish(panel)});
+const SESSION_SCHEMA="official-qr-home-v1";
+let done=false,owner="",held=false,panel=readPanelState()||localPanel();
+main().finally(()=>{unlock();savePanelState(panel);finish(panel)});
 async function main(){try{
- if(auto()){panel=localPanel();return}
+ if(auto()){panel=readPanelState()||localPanel();return}
  if(!(await lock())){panel=P("⚠️ 登录工具正在运行｜请完成当前扫码流程","clock.fill","#FF9F0A");return}
+ resetStoredSession();
+ panel=P("🔄 旧 Cookie 已清除｜正在生成新的官方二维码","arrow.clockwise.circle.fill","#0A84FF");savePanelState(panel);
  const t=await transaction();notifyQR(t);let map=await waitLogin(t.key);map=await homeMerge(map);if(!map.buvid3)Object.assign(map,await spi());
- const miss=NEED.filter(k=>!map[k]);if(miss.length)throw E("Cookie 不完整","缺少必要字段："+miss.join("、")+"。原有 Cookie 已保留。","cookie_incomplete");
+ const miss=NEED.filter(k=>!map[k]);if(miss.length)throw E("Cookie 不完整","缺少必要字段："+miss.join("、")+"。本次新会话未保存，请重新扫码。","cookie_incomplete");
  const cookie=serialize(map),nav=(await get(NAV,cookie,true)).body;
- if(!logged(nav)||String(nav.data.mid||"")!==String(map.DedeUserID||""))throw E("Cookie 验证失败","新会话未通过 Bilibili 登录验证，原有 Cookie 已保留。","cookie_invalid");
+ if(!logged(nav)||String(nav.data.mid||"")!==String(map.DedeUserID||""))throw E("Cookie 验证失败","新会话未通过 Bilibili 登录验证，本次不会保存 Cookie。","cookie_invalid");
  if(!$persistentStore.write(cookie,CK))throw E("保存失败","Surge 本地持久化存储写入失败。","store_failed");
- $persistentStore.write(JSON.stringify({version:VER,updatedAt:Date.now(),source:"official-qr+home"}),META);$persistentStore.write("",BAD);
- panel=P("✅ Cookie 已保存｜官方扫码登录 + 主站会话已补全","key.fill","#34C759");$notification.post(NAME,"✅ Cookie 已保存","Bilibili 官方扫码登录完成，会话已补全并保存到 Surge 本地。");
-}catch(e){const x=norm(e);panel=P("❌ "+x.title+"｜点击刷新重新获取","xmark.circle.fill","#FF3B30");console.log("[Betty-Bilibili-Cookie] "+x.code);$notification.post(NAME,"❌ "+x.title,x.body)}}
-function localPanel(){const c=$persistentStore.read(CK),b=$persistentStore.read(BAD);if(b)return P("❌ Cookie 已标记失效｜点击刷新重新扫码","key.slash.fill","#FF3B30");if(c&&hasNeed(c))return P("✅ Cookie 已保存｜点击刷新可重新扫码更新","key.fill","#34C759");return P("点击刷新生成官方登录二维码｜不会打开浏览器","key.fill","#8E8E93")}
+ const meta={version:VER,updatedAt:Date.now(),source:"official-qr+home",schema:SESSION_SCHEMA,verified:true,uid:String(map.DedeUserID||"")};
+ if(!$persistentStore.write(JSON.stringify(meta),META)){ $persistentStore.write("",CK); throw E("保存失败","Cookie 已回滚清除：会话验证标记写入失败。","meta_store_failed") }
+ $persistentStore.write("",BAD);
+ panel=P("✅ Cookie 已验证并保存｜点击刷新会先清空并重新扫码","key.fill","#34C759");$notification.post(NAME,"✅ Cookie 已验证并保存","全新 Bilibili 官方扫码会话已建立、主站会话已补全并通过登录验证。");
+}catch(e){const x=norm(e);panel=P("❌ "+x.title+"｜当前无可用新 Cookie","xmark.circle.fill","#FF3B30");console.log("[Betty-Bilibili-Cookie] "+x.code);$notification.post(NAME,"❌ "+x.title,x.body)}}
+function resetStoredSession(){
+ $persistentStore.write("",CK);$persistentStore.write("",META);$persistentStore.write("",BAD);$persistentStore.write("",STATE);
+ if($persistentStore.read(CK)||$persistentStore.read(META))throw E("重置失败","无法彻底清除旧 Cookie 缓存，本次不创建新的登录事务。","reset_failed")
+}
+function readMeta(){const s=$persistentStore.read(META);if(!s)return null;try{const m=JSON.parse(s);return m&&typeof m==="object"?m:null}catch(_){return null}}
+function localPanel(){const c=$persistentStore.read(CK),b=$persistentStore.read(BAD),m=readMeta();if(b)return P("❌ Cookie 已标记失效｜点击刷新重新扫码","key.slash.fill","#FF3B30");if(c&&hasNeed(c)&&m&&m.verified===true&&m.schema===SESSION_SCHEMA)return P("✅ Cookie 已验证并保存｜点击刷新会先清空并重新扫码","key.fill","#34C759");if(c)return P("⚠️ 检测到旧或未验证 Cookie｜点击刷新会先清空","exclamationmark.triangle.fill","#FF9F0A");return P("点击刷新清空旧状态并生成全新官方二维码","key.fill","#8E8E93")}
+function readPanelState(){const s=$persistentStore.read(STATE);if(!s)return null;try{const x=JSON.parse(s);return x&&x.title&&x.content?x:null}catch(_){return null}}
+function savePanelState(x){if(!x||!x.title||!x.content)return;$persistentStore.write(JSON.stringify(x),STATE)}
 async function transaction(){
  const r=await get(GEN,"",false),b=r.body;
  if(!b||code(b)!==0||!b.data)throw E("二维码申请失败","Bilibili 未能创建官方登录事务。","qr_generate");
