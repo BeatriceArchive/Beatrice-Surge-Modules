@@ -1,0 +1,10 @@
+#!name=贝蒂的基础面板
+#!desc=一个面板汇总本地网络、出口 IP、DNS、延迟、测速、流媒体、AI 可达性、当前配置剩余流量与 IP 风险信息。
+#!category=🩺 网络工具
+#!system=ios
+
+[Panel]
+贝蒂的基础面板 = script-name=Betty-Basic-Panel, update-interval=1800
+
+[Script]
+Betty-Basic-Panel = type=generic, script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Basic-Panel.js, timeout=90, argument="YS=1&RISK=1"
