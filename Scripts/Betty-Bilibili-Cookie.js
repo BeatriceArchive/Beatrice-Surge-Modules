@@ -1,7 +1,7 @@
 /*
  * Betty-Bilibili-Cookie
  * 贝蒂的哔哩哔哩 Cookie 获取
- * Version: 1.2.1
+ * Version: 1.2.2
  * Runtime: Surge Generic Script
  *
  * 仅在用户手动刷新 Panel 或手动运行脚本时，通过 Bilibili 官方登录接口创建一次登录事务。
@@ -49,11 +49,13 @@ COOKIE_ORDER.forEach(function (name) {
 let doneCalled = false;
 let runLockOwner = "";
 let runLockHeld = false;
-let finalPanelResult = {
-  title: NAME,
-  content: "点击刷新，手动运行 Bilibili 官方登录工具",
-  style: "info"
-};
+let hadExistingCookieAtStart = false;
+let wasMarkedInvalidAtStart = false;
+let finalPanelResult = makePanelResult(
+  "Cookie 状态待检测｜点击刷新获取或更新",
+  "key.fill",
+  "#8E8E93"
+);
 
 run();
 
@@ -65,6 +67,8 @@ async function run() {
     }
 
     await acquireRunLock();
+    hadExistingCookieAtStart = !!$persistentStore.read(COOKIE_KEY);
+    wasMarkedInvalidAtStart = !!$persistentStore.read(INVALID_NOTICE_KEY);
     console.log("[Betty-Bilibili-Cookie] Official login started");
 
     const transaction = await createLoginTransaction();
@@ -115,20 +119,16 @@ async function run() {
       : "Cookie 已保存到 Surge 本地，可供每日签到模块使用。";
     const resetText = noticeReset ? "" : " Cookie 已保存，但失效提醒状态重置失败。";
 
-    finalPanelResult = {
-      title: "✅ Cookie 已保存",
-      content: "Cookie 已保存到 Surge 本地" + resetText,
-      style: "good"
-    };
+    finalPanelResult = makePanelResult(
+      "✅ Cookie 已保存｜点击刷新重新登录更新",
+      "key.fill",
+      "#34C759"
+    );
     $notification.post(NAME, "✅ Cookie 已保存", resultText + resetText);
     console.log("[Betty-Bilibili-Cookie] Official login completed");
   } catch (error) {
     const safeError = normalizeFailure(error);
-    finalPanelResult = {
-      title: "❌ 获取失败",
-      content: safeError.title + "：" + safeError.body,
-      style: "error"
-    };
+    finalPanelResult = panelResultForFailure(safeError);
     console.log("[Betty-Bilibili-Cookie] Failed: " + safeError.logCode);
     $notification.post(NAME, "❌ " + safeError.title, safeError.body);
   } finally {
@@ -623,6 +623,47 @@ function isAutomaticPanelInvocation() {
   return isPanelInvocation()
     && typeof $trigger === "string"
     && $trigger === "auto-interval";
+}
+
+function makePanelResult(content, iconName, iconColor) {
+  return {
+    title: NAME,
+    content: content,
+    icon: iconName,
+    "icon-color": iconColor
+  };
+}
+
+function panelResultForFailure(safeError) {
+  if (safeError.logCode === "run_locked" || safeError.logCode === "run_lock_contended") {
+    return makePanelResult(
+      "⚠️ 登录流程进行中｜请稍后再试",
+      "clock.fill",
+      "#FF9F0A"
+    );
+  }
+
+  if (hadExistingCookieAtStart && wasMarkedInvalidAtStart) {
+    return makePanelResult(
+      "❌ Cookie 已失效｜点击刷新重新获取",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
+  }
+
+  if (hadExistingCookieAtStart) {
+    return makePanelResult(
+      "⚠️ 更新失败｜旧 Cookie 已保留",
+      "exclamationmark.triangle.fill",
+      "#FF9F0A"
+    );
+  }
+
+  return makePanelResult(
+    "❌ 获取失败｜" + safeError.title,
+    "xmark.circle.fill",
+    "#FF3B30"
+  );
 }
 
 function doneOnce(panelResult) {

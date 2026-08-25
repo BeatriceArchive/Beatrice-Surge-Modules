@@ -1,7 +1,7 @@
 /*
  * Betty-Bilibili-Daily
  * 贝蒂的哔哩哔哩每日签到
- * Version: 1.1.0
+ * Version: 1.2.0
  * Runtime: Surge
  *
  * 功能：每日登录/观看/分享/投币经验任务。
@@ -9,9 +9,10 @@
  */
 
 const NAME = "贝蒂的哔哩哔哩每日签到";
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const COOKIE_KEY = "betty.bilibili.cookie";
 const INVALID_NOTICE_KEY = "betty.bilibili.cookie.invalid_notice";
+const RUN_LOCK_KEY = "betty.bilibili.daily.run_lock";
 const MAX_DAILY_COINS = 5;
 const MAX_CANDIDATES = 16;
 const MAX_WATCH_ATTEMPTS = 3;
@@ -19,22 +20,54 @@ const MAX_SHARE_ATTEMPTS = 4;
 const MAX_COIN_ATTEMPTS = 8;
 const REQUEST_TIMEOUT = 6;
 const READ_RETRY_DELAY = 300;
+const RUN_LOCK_TTL_MS = 120000;
+const LOCK_CONFIRM_DELAY_MS = 120;
+const LOCK_CONFIRM_ROUNDS = 2;
 
 const UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 
 let doneCalled = false;
+let runLockOwner = "";
+let runLockHeld = false;
+let finalPanelResult = makePanelResult(
+  "每天 08:00 自动执行｜点击刷新立即运行",
+  "calendar.badge.checkmark",
+  "#8E8E93"
+);
 
 run();
 
 async function run() {
   try {
+    if (isAutomaticPanelInvocation()) {
+      log("Automatic panel invocation ignored");
+      return;
+    }
+
+    const acquired = await acquireRunLock();
+    if (!acquired) {
+      finalPanelResult = makePanelResult(
+        "⚠️ 任务正在运行｜未启动重复实例",
+        "clock.fill",
+        "#FF9F0A"
+      );
+      log("Another Daily instance is already running");
+      return;
+    }
+
     await main();
   } catch (error) {
     const message = errorMessage(error);
     log("Fatal: " + message);
+    finalPanelResult = makePanelResult(
+      "❌ 执行失败｜脚本遇到未预期错误",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
     notify("执行失败", message);
   } finally {
-    doneOnce();
+    releaseRunLock();
+    doneOnce(finalPanelResult);
   }
 }
 
@@ -43,7 +76,12 @@ async function main() {
 
   const cookie = $persistentStore.read(COOKIE_KEY);
   if (!cookie) {
-    notify("尚未获取 Cookie", "请先临时安装“贝蒂的哔哩哔哩 Cookie 获取”模块，抓取成功后即可删除该模块。");
+    finalPanelResult = makePanelResult(
+      "❌ 无法执行｜请先获取 Cookie",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
+    notify("尚未获取 Cookie", "请先通过“贝蒂的哔哩哔哩 Cookie 获取”Panel 完成官方登录。");
     return;
   }
 
@@ -53,12 +91,22 @@ async function main() {
     return !cookieObj[field];
   });
   if (missingFields.length > 0) {
-    notify("Cookie 信息不完整", "缺少 " + missingFields.join("、") + "，请重新抓取 Cookie。");
+    finalPanelResult = makePanelResult(
+      "❌ 无法执行｜Cookie 信息不完整",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
+    notify("Cookie 信息不完整", "缺少 " + missingFields.join("、") + "，请重新获取 Cookie。");
     return;
   }
 
   const nav = await getNav(cookie);
   if (!isLoggedIn(nav)) {
+    finalPanelResult = makePanelResult(
+      "❌ 无法执行｜Cookie 已失效，请先重新获取",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
     notifyInvalidCookieOncePerDay(apiReason(nav, "账号未登录"));
     return;
   }
@@ -70,6 +118,11 @@ async function main() {
 
   const status = await getDailyStatus(cookie);
   if (!status) {
+    finalPanelResult = makePanelResult(
+      "❌ 执行失败｜状态查询失败",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
     notify("状态查询失败", "未能可靠读取今日经验任务状态，本次不执行写入操作。");
     return;
   }
@@ -154,6 +207,11 @@ async function main() {
 
   const refreshedNav = await getNav(cookie, 0);
   if (refreshedNav && !isLoggedIn(refreshedNav) && responseCode(refreshedNav) === -101) {
+    finalPanelResult = makePanelResult(
+      "❌ 无法执行｜Cookie 已失效，请先重新获取",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
     notifyInvalidCookieOncePerDay(apiReason(refreshedNav, "账号未登录"));
     return;
   }
@@ -191,6 +249,26 @@ async function main() {
     "投币 " + coinText + coinSuffix,
     "今日经验 " + dailyExp + "/65｜硬币余额 " + balanceText
   ].join("\n");
+
+  if (complete && coinLimitedByBalance) {
+    finalPanelResult = makePanelResult(
+      "⚠️ 今日任务已完成｜投币 " + coinText + "（余额不足）",
+      "exclamationmark.triangle.fill",
+      "#FF9F0A"
+    );
+  } else if (complete) {
+    finalPanelResult = makePanelResult(
+      "✅ 今日任务已完成｜登录 / 观看 / 分享 / 投币 " + coinText,
+      "checkmark.circle.fill",
+      "#34C759"
+    );
+  } else {
+    finalPanelResult = makePanelResult(
+      "⚠️ 今日任务未完全完成｜投币 " + coinText,
+      "exclamationmark.triangle.fill",
+      "#FF9F0A"
+    );
+  }
 
   notify(subtitle, content);
 }
@@ -660,9 +738,19 @@ function classifyStopReason(body) {
 
 function notifyStopReason(reason) {
   if (reason === "cookie") {
+    finalPanelResult = makePanelResult(
+      "❌ 无法执行｜Cookie 已失效，请先重新获取",
+      "xmark.circle.fill",
+      "#FF3B30"
+    );
     notifyInvalidCookieOncePerDay("任务接口返回未登录或 CSRF 校验失败");
     return;
   }
+  finalPanelResult = makePanelResult(
+    "❌ 执行失败｜账号状态异常",
+    "xmark.circle.fill",
+    "#FF3B30"
+  );
   notify("账号状态异常", "B站拒绝了账号操作，本次已停止后续写入任务。");
 }
 
@@ -747,10 +835,98 @@ function localDateKey() {
   return year + "-" + month + "-" + day;
 }
 
-function doneOnce() {
+async function acquireRunLock() {
+  const now = Date.now();
+  const existing = readRunLock();
+  if (existing && existing.expiresAt > now) {
+    return false;
+  }
+
+  const owner = createRunLockOwner();
+  const value = JSON.stringify({
+    owner: owner,
+    expiresAt: now + RUN_LOCK_TTL_MS
+  });
+  if (!$persistentStore.write(value, RUN_LOCK_KEY)) {
+    throw new Error("Daily 本地运行锁创建失败");
+  }
+
+  for (let round = 0; round < LOCK_CONFIRM_ROUNDS; round += 1) {
+    await wait(LOCK_CONFIRM_DELAY_MS);
+    const confirmed = readRunLock();
+    if (!confirmed || confirmed.owner !== owner || confirmed.expiresAt <= Date.now()) {
+      return false;
+    }
+  }
+
+  runLockOwner = owner;
+  runLockHeld = true;
+  return true;
+}
+
+function releaseRunLock() {
+  if (!runLockHeld || !runLockOwner) return;
+
+  const current = readRunLock();
+  if (current && current.owner === runLockOwner) {
+    let released = $persistentStore.write(null, RUN_LOCK_KEY);
+    if (!released) {
+      released = $persistentStore.write("", RUN_LOCK_KEY);
+    }
+  }
+
+  runLockHeld = false;
+  runLockOwner = "";
+}
+
+function readRunLock() {
+  const stored = $persistentStore.read(RUN_LOCK_KEY);
+  if (!stored) return null;
+
+  try {
+    const parsed = JSON.parse(stored);
+    const owner = parsed && typeof parsed.owner === "string" ? parsed.owner : "";
+    const expiresAt = parsed ? Number(parsed.expiresAt) : NaN;
+    if (!owner || owner.length > 80 || !Number.isFinite(expiresAt)) return null;
+    return { owner: owner, expiresAt: expiresAt };
+  } catch (_) {
+    return null;
+  }
+}
+
+function createRunLockOwner() {
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 14);
+}
+
+function isPanelInvocation() {
+  return typeof $input === "object"
+    && $input
+    && $input.purpose === "panel";
+}
+
+function isAutomaticPanelInvocation() {
+  return isPanelInvocation()
+    && typeof $trigger === "string"
+    && $trigger === "auto-interval";
+}
+
+function makePanelResult(content, iconName, iconColor) {
+  return {
+    title: NAME,
+    content: content,
+    icon: iconName,
+    "icon-color": iconColor
+  };
+}
+
+function doneOnce(panelResult) {
   if (doneCalled) return;
   doneCalled = true;
-  $done();
+  if (isPanelInvocation()) {
+    $done(panelResult);
+  } else {
+    $done();
+  }
 }
 
 function log(message) {
