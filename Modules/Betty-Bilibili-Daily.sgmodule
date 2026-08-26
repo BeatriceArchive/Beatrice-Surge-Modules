@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩每日签到
-#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务；只接受 Cookie 工具当前 schema 验证过的新会话，所有请求按 Surge 当前规则与代理策略正常出站，单项被拒绝时尽量继续完成其他安全任务。
+#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务，并为大会员尝试领取每日 +10 经验。投币按当日进度补足至最多 5 枚，加入有限候选重试与写入间隔；所有请求按 Surge 当前规则与代理策略正常出站。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.4.2
+# Version: 1.5.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 
@@ -10,5 +10,5 @@
 贝蒂的哔哩哔哩每日签到 = title="贝蒂的哔哩哔哩每日签到",content="每天 08:00 自动执行｜点击刷新立即运行",icon=calendar.badge.checkmark,icon-color="#8E8E93",script-name=Betty-Bilibili-Daily-Panel,update-interval=15
 
 [Script]
-Betty-Bilibili-Daily = type=cron,cronexp="0 8 * * *",script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,wake-system=true,timeout=90,script-update-interval=60
-Betty-Bilibili-Daily-Panel = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,timeout=90,script-update-interval=60
+Betty-Bilibili-Daily = type=cron,cronexp="0 8 * * *",script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,wake-system=true,timeout=240,script-update-interval=60
+Betty-Bilibili-Daily-Panel = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Daily.js,timeout=240,script-update-interval=60
