@@ -1,0 +1,46 @@
+Beatrice Personal Use License v1.0
+
+Copyright (c) 2026 BeatriceArchive. All rights reserved except as expressly granted below.
+
+This license applies only to portions of this repository for which BeatriceArchive owns or controls the copyright. Third-party materials remain subject to their original licenses and notices.
+
+1. Permission
+
+You are granted a limited, non-exclusive, non-transferable, non-sublicensable license to:
+
+- download, install, and run the unmodified Work for personal, non-commercial use;
+- make private local modifications solely for your own personal, non-commercial use;
+- share links that point to the official BeatriceArchive repository or its official raw.githubusercontent.com files;
+- use GitHub's built-in fork functionality only to the extent separately permitted by GitHub's Terms of Service, including for study or contribution through pull requests.
+
+2. Restrictions
+
+Except where applicable law gives you a right that cannot be restricted, you may not, without prior written permission from BeatriceArchive:
+
+- republish, mirror, re-upload, redistribute, sublicense, or otherwise provide copies of the Work or substantial portions of it from another repository, website, package, channel, or distribution point;
+- publish or distribute modified, adapted, translated, rebranded, or other derivative versions of the Work;
+- copy the Work into another project or repository for public distribution, whether modified or unmodified;
+- remove, hide, alter, or misrepresent copyright, license, author, project, or source notices;
+- rename or rebrand the Work and present it as your own original work;
+- claim authorship of code, modules, documentation, or other material you did not author;
+- use the Work for commercial sale, paid distribution, licensing, or other commercial exploitation.
+
+A GitHub fork permitted by GitHub's Terms does not grant permission to rebrand the Work, remove attribution, advertise the fork as an independent original project, or redistribute derivative versions outside the rights separately granted by GitHub.
+
+3. Official-link sharing
+
+You may freely recommend the project and share the official repository URL or official raw file URLs. Configuration files may reference the official raw URLs without copying the Work into another distribution.
+
+4. Third-party materials
+
+Any third-party code, interfaces, assets, notices, or other materials included in or referenced by this repository are excluded from this license to the extent they are governed by separate terms. Their original licenses and copyright notices continue to apply.
+
+5. No warranty
+
+THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE WORK OR ITS USE.
+
+6. Termination
+
+Any permission granted by this license terminates automatically upon a material violation of these terms. Rights not expressly granted are reserved.
+
+This is a custom source-available license. It is not the MIT License, GPL, Apache License, or an OSI-approved open-source license.

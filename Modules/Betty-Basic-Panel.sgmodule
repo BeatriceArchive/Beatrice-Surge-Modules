@@ -2,6 +2,9 @@
 #!desc=一个面板汇总本地网络、出口 IP、DNS、延迟、测速、流媒体、AI 可达性、当前配置剩余流量与 IP 风险信息。
 #!category=🩺 网络工具
 #!system=ios
+# Copyright (c) 2026 BeatriceArchive
+# Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
+# License: https://github.com/BeatriceArchive/Beatrice-Surge-Modules/blob/main/LICENSE
 
 [Panel]
 贝蒂的基础面板 = script-name=Betty-Basic-Panel, update-interval=1800

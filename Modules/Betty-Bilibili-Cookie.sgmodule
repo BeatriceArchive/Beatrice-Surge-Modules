@@ -4,6 +4,9 @@
 #!category=Beatrice
 # Version: 1.4.2
 # Project: Betty-Bilibili-Daily
+# Copyright (c) 2026 BeatriceArchive
+# Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
+# License: https://github.com/BeatriceArchive/Beatrice-Surge-Modules/blob/main/LICENSE
 
 [Panel]
 贝蒂的哔哩哔哩 Cookie 获取 = title="贝蒂的哔哩哔哩 Cookie 获取",content="点击刷新清空旧状态并生成全新官方二维码",icon=key.fill,icon-color="#8E8E93",script-name=Betty-Bilibili-Cookie,update-interval=10

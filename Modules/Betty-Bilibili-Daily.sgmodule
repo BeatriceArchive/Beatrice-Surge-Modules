@@ -5,6 +5,9 @@
 # Version: 1.6.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
+# Copyright (c) 2026 BeatriceArchive
+# Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
+# License: https://github.com/BeatriceArchive/Beatrice-Surge-Modules/blob/main/LICENSE
 
 [Panel]
 贝蒂的哔哩哔哩每日签到 = title="贝蒂的哔哩哔哩每日签到",content="每天 08:00 自动执行｜点击刷新立即运行",icon=calendar.badge.checkmark,icon-color="#8E8E93",script-name=Betty-Bilibili-Daily-Panel,update-interval=15
