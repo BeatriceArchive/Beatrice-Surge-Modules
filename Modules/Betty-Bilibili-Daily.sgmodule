@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩每日签到
-#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务与大会员大积分签到。通知会逐项显示任务、经验与投币写入结果；投币采用更长间隔与有限冷却重试补足至最多 5 枚。
+#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务与大会员签到。通知会逐项显示任务、经验与投币写入结果；投币采用投前检查、完整 Web 表单参数与有限冷却重试补足至最多 5 枚。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.6.2
+# Version: 1.6.3
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 # Copyright (c) 2026 BeatriceArchive
