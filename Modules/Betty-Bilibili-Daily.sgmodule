@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩每日签到
-#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务，并为大会员尝试领取每日 +10 经验。投币按当日进度补足至最多 5 枚，加入有限候选重试与写入间隔；所有请求按 Surge 当前规则与代理策略正常出站。
+#!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务与大会员大积分签到。分享为 best-effort，单项失败不会阻断大会员签到或投币；投币按当天进度与余额补到最多 5 枚。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.5.0
+# Version: 1.6.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 
