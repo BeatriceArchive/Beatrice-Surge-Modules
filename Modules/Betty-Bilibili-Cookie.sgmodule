@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩 Cookie 获取
-#!desc=手动刷新即清空旧会话并创建全新的 Bilibili 官方 Web 二维码登录事务；二维码在本机生成，扫码成功后补全主站会话并验证后保存。无需 MITM、CA 或 HTTPS 解密。
+#!desc=手动刷新会清空旧会话并创建全新的 Bilibili 官方 Web 二维码登录事务；登录、主站补全与验证均固定使用 DIRECT，必须取得真实主站/扫码设备会话后才保存。无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.4.0
+# Version: 1.4.1
 # Project: Betty-Bilibili-Daily
 
 [Panel]
