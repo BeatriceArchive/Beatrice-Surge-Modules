@@ -40,7 +40,7 @@ https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Mo
 
 大会员账号会额外领取每日“专属等级加速包”对应的 +10 主站账号等级经验。脚本会先确保当日观看任务已经完成，再调用 `/x/vip/experience/add` 领取；成功返回后会再次读取 `/nav` 的 `level_info.current_exp` 验证经验变化。若接口返回 `69198`，视为当天已经领取。非大会员安全跳过。该 +10 EXP 与普通登录、观看、分享、投币组成的 65 EXP 每日任务分开显示，因此大会员当日理论最高可获得 75 点等级经验。
 
-分享必须由 `/x/member/web/exp/reward` 返回 `share: true` 才显示完成；HTTP 200 或 `code=0` 只表示请求被接受。写入前先读取任务状态，每个账号每个北京时间自然日最多一次 `/x/web-interface/share/add` POST，写入前持久化尝试记录，避免超时、重复手动执行或脚本重启造成重复写入。之后最多三次确认读取（等待 0、1.2、2.5 秒）；未确认就明确显示“分享未确认”和任务部分完成，不能显示整日成功。再次执行只读取状态，不重复写入；状态不可读时不发起分享。认证失效仍停止后续写操作。
+分享必须由 `/x/member/web/exp/reward` 返回 `share: true` 才显示完成；HTTP 200 或 `code=0` 只表示请求被接受。写入前先读取任务状态，每个账号每个北京时间自然日最多一次 `/x/web-interface/share/add` POST（最小表单 `bvid + csrf`，不再携带未证实必要的 `eab_x/ramval/source/ga`），写入前持久化尝试记录，避免超时、重复手动执行或脚本重启造成重复写入。之后最多三次确认读取（等待 0、1.2、2.5 秒）；未确认就明确显示“分享未确认”和任务部分完成，不能显示整日成功。升级保留旧版当天尝试记录；损坏记录修复后保守暂停当天写入，次日恢复，不会永久阻塞。再次执行只读取状态，不重复写入；状态不可读时不发起分享。认证失效仍停止后续写操作。
 
 该机制保证状态报告和写入上限，不保证 Bilibili 风控环境一定给分享任务记账。实际账号的任务归因仍需下一次真实执行验证；脚本不通过改随机参数、切换未知接口或连续分享多个视频绕过限制。
 
@@ -50,11 +50,11 @@ https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Mo
 
 Cookie 获取与 Daily 任务不强制指定 DIRECT，而是按 Surge 当前规则、策略组与代理配置正常出站，避免模块擅自绕过用户现有网络设计。Cookie 工具只接受官方二维码登录响应与 Bilibili 主站补全得到的设备会话；不使用 SPI 人工补 `buvid3`。扫码后如果仍无法得到 `buvid3`，Cookie 获取会直接失败并保持本地无可用 Cookie。
 
-日常模块本身没有 Cookie 监听或 MITM，不会常驻抓取 Cookie。首次使用、Cookie 失效或版本升级要求重新建立会话时，安装 `Betty-Bilibili-Cookie.sgmodule`，在 Surge 中找到“贝蒂的哔哩哔哩 Cookie 获取”Panel，手动点击刷新；刷新会先清空旧 Cookie，再生成新的 Bilibili 官方二维码。长按通知查看二维码并截图，在 Bilibili App 的“扫一扫”中从相册识别并确认登录。
+日常模块本身没有 Cookie 监听或 MITM，不会常驻抓取 Cookie。首次使用、Cookie 失效或版本升级要求重新建立会话时，安装 `Betty-Bilibili-Cookie.sgmodule`，在 Surge 中找到“贝蒂的哔哩哔哩 Cookie 获取”Panel，手动点击刷新；刷新会生成新的 Bilibili 官方二维码；原有已验证 Cookie 在新登录、设备会话补全、必需字段检查和 `/nav` UID 验证全部成功前保持不变。长按通知查看二维码并截图，在 Bilibili App 的“扫一扫”中从相册识别并确认登录。
 
 如果已经生成二维码但忘记截图，只要当前二维码仍在有效期内，再次点击 Cookie Panel 刷新即可重新显示同一张二维码，不会创建第二个登录事务。为支持这一容错，二维码内容仅在 Surge 本地临时保存，并在成功、失败或超时后清除；不会写入仓库、日志或发送给第三方服务。收到“✅ Cookie 已验证并保存”后 Daily 即可使用。
 
-两个 Panel 的自动刷新仅读取 Surge 本地状态，不会自动创建登录事务或执行 Daily 写任务。Cookie 工具不使用 MITM、CA 或 HTTPS 解密，不需要修改托管 Profile，也不需要创建本地配置副本。带 Cookie 的请求禁用自动重定向；非 2xx 响应不能视为成功。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
+两个 Panel 的自动刷新仅读取 Surge 本地状态，不会自动创建登录事务或执行 Daily 写任务。Cookie 工具不使用 MITM、CA 或 HTTPS 解密，不需要修改托管 Profile，也不需要创建本地配置副本。主站补全支持最多三次受控跳转，仅允许 `https://www.bilibili.com`、`https://m.bilibili.com` 与 `https://bilibili.com`（默认端口）；逐跳合并官方响应中的 Cookie。QR 和 `/nav` 接口不跟随重定向，最终非 2xx 响应不能视为成功。完整验证后，Cookie 与验证信息通过单次本地写入提交为同一会话；Daily 优先读取该会话，兼容已有旧键，并为缓存中的旧 Daily 保留兼容镜像。新登录失败不清除原会话。只有显式通过快捷指令传入 `reset` 参数才会销毁会话，普通 Panel 刷新不会重置。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
 
 Surge 当前官方 Panel 语法没有跨模块全局排序字段，因此 Bilibili 面板与基础面板的显示顺序主要由用户本地模块顺序决定。
 
@@ -76,3 +76,5 @@ node --test tests/*.test.mjs
 ```
 
 行为测试在隔离的 mock Surge 环境运行，不使用真实 Cookie，不触发真实 Bilibili 写入。
+
+本次手机回归与分享请求依据见 [Bilibili 会话与分享说明](docs/bilibili-session-share.md)。分享 `-403` 表示操作被服务端拒绝，不能仅凭 `/nav` 可登录推断分享会获准，也不应因此自动清空 Cookie。

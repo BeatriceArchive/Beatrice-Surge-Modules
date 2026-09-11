@@ -2,9 +2,10 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.8.0";
+const N="贝蒂的哔哩哔哩每日签到",V="1.9.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
+const SESSION="betty.bilibili.cookie.session";
 const SHARE_KEY="betty.bilibili.daily.share_attempt.";
 const MAX=5,TO=7,TTL=360000,COIN_MAX_WRITES=10,COIN_MAX_34004=3;
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
@@ -38,7 +39,7 @@ async function main(){
 }
 
 async function run(){
- const cookie=$persistentStore.read(CK),meta=readMeta();
+ const savedSession=readSession(),cookie=savedSession.cookie,meta=savedSession.meta;
  if(!cookie||!meta||meta.verified!==true||meta.schema!==SC){
   panel=P("❌ 无法执行｜请重新获取有效 Cookie","xmark.circle.fill","#FF3B30");
   notify("Cookie 会话需要更新","请刷新 Cookie Panel 重新扫码。");return;
@@ -159,22 +160,34 @@ async function share(list,watched,uid,csrf,cookie){
  if(beforeError)return beforeError;
  if(!before||code(before)!==0||!before.data||typeof before.data.share!=="boolean")return op("分享",null,"无法查询任务状态，未执行写入");
  if(before.data.share)return null;
- const day=new Date(Date.now()+8*3600000).toISOString().slice(0,10),key=SHARE_KEY+uid;
+ const day=shareDay(),key=SHARE_KEY+uid;
  const saved=$persistentStore.read(key);let attempt=null;
- if(saved){try{attempt=JSON.parse(saved);if(!attempt||typeof attempt.day!=="string")throw new Error();}catch(_){return op("分享",null,"本地尝试记录损坏，已停止写入")}}
+ if(saved){
+  try{attempt=JSON.parse(saved);if(!attempt||!validShareDay(attempt.day)||attempt.day>day)throw new Error();}
+  catch(_){
+   // Unknown attempt time: consume today conservatively, but recover tomorrow.
+   const quarantined={version:2,day,requestSucceeded:false,code:null,confirmed:false,quarantined:true};
+   if(!$persistentStore.write(JSON.stringify(quarantined),key))return op("分享",null,"尝试记录损坏且无法修复，未执行写入");
+   return op("分享",null,"尝试记录已修复；今日暂停分享写入，明日起恢复");
+  }
+ }
  if(attempt&&attempt.day===day)return confirmShare(cookie,attempt,key);
  let v=watched;
  if(!v)for(let i=0;i<Math.min(list.length,4);i++){v=await video(list[i],cookie);if(v)break}
  if(!v)return op("分享",null,"没有可用视频");
  // Persist before sending: a timeout or killed script must not cause another write.
- attempt={day,requestSucceeded:false,code:null,confirmed:false};
+ if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
+ attempt={version:2,day,requestSucceeded:false,code:null,confirmed:false};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
- const b=await postForm(A.share,form({aid:v.aid,csrf,eab_x:1,ramval:3,source:"web_normal",ga:1}),cookie,HOME+"video/"+v.bvid),e=classify(b,"分享");
+ const b=await postForm(A.share,form({bvid:v.bvid,csrf}),cookie,HOME+"video/"+v.bvid+"/"),e=classify(b,"分享");
  attempt.code=code(b);attempt.requestSucceeded=code(b)===0;
  $persistentStore.write(JSON.stringify(attempt),key);
- if(e)return e;
+ if(e&&e.fatal)return e;
+ if(attempt.code===-403||attempt.code===403)return op("分享",attempt.code,"服务端拒绝分享；未确认完成，今日不再写入。Cookie 可验证不代表分享获准");
  return confirmShare(cookie,attempt,key);
 }
+function shareDay(){return new Date(Date.now()+8*3600000).toISOString().slice(0,10)}
+function validShareDay(day){return typeof day==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day+"T00:00:00Z"))&&new Date(day+"T00:00:00Z").toISOString().slice(0,10)===day}
 async function confirmShare(cookie,attempt,key){
  for(const delay of [0,1200,2500]){
   if(delay)await sleep(delay);
@@ -182,7 +195,7 @@ async function confirmShare(cookie,attempt,key){
   if(e)return e;
   if(b&&code(b)===0&&b.data&&b.data.share===true){attempt.confirmed=true;$persistentStore.write(JSON.stringify(attempt),key);return null}
  }
- return op("分享",attempt.code,attempt.requestSucceeded?"请求已接受，但每日分享任务未确认；今日不再重复写入":"每日分享任务未确认；今日写入次数已用尽");
+ return op("分享",attempt.code,attempt.requestSucceeded===true?"请求已接受，但每日分享任务未确认；今日不再重复写入":"每日分享任务未确认；今日写入次数已用尽");
 }
 
 async function coins(list,goal,start,uid,csrf,cookie){
@@ -215,7 +228,7 @@ function coinResult(count,spent,writes,hit34004,err){return{count,spent,err,meta
 function get(u,c,r,n=0){return req("GET",u,"",c,r,n,null,null)}
 function postForm(u,b,c,r,o="https://www.bilibili.com"){return req("POST",u,b,c,r,0,o,"application/x-www-form-urlencoded; charset=UTF-8")}
 async function req(m,u,b,c,r,n,o,ct){let x=null;for(let i=0;i<=n;i++){x=await raw(m,u,b,c,r,o,ct);if(x.body)return x.body;if(!x.retry||i===n)break;await sleep(300*(i+1))}return null}
-function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=res&&Number.isFinite(Number(res.status))?Number(res.status):null;let j=parse(data);if(j&&typeof j==="object"&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:j,retry:true});return}if(hs<200||hs>=300){if(!j||typeof j!=="object")j={code:hs,message:"HTTP "+hs,__httpStatus:hs};else if(code(j)===null)j.code=hs;ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:false})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
+function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=res&&res.status!=null&&Number.isFinite(Number(res.status))?Number(res.status):null;let j=parse(data);if(j&&typeof j==="object"&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:null,retry:true});return}if(hs<200||hs>=300){if(!j||typeof j!=="object")j={code:hs,message:"HTTP "+hs,__httpStatus:hs};else if(code(j)===null)j.code=hs;ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:false})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
 function classify(b,stage){const c=code(b),m=txt(b&&(b.message||b.msg)||"B站拒绝了请求",120);if(c===-101||c===-111)return{fatal:true,type:"cookie",stage,code:c,message:m};if(c===-102)return{fatal:true,type:"account",stage,code:c,message:m};if(c===-403||c===403)return op(stage,c,m);return null}
 function op(stage,code,message){return{fatal:false,type:"operation",stage,code,message:txt(message,120)}}
 function fatal(e){const c=e.code==null?"未知":String(e.code),d="阶段："+e.stage+"\ncode："+c+"\nmessage："+e.message;if(e.type==="cookie"){panel=P("❌ "+e.stage+"失败｜code "+c+"，请重新扫码","xmark.circle.fill","#FF3B30");bad(d)}else{panel=P("❌ "+e.stage+"被拒绝｜code "+c,"xmark.circle.fill","#FF3B30");notify("B站请求被拒绝",d+"\n已停止后续写入任务。")}}
@@ -230,6 +243,11 @@ function coinNotice(before,after,limited,err,meta){const b=before==null?"未知"
 function levelExpNotice(a,b){if(a===null||b===null)return"账号等级经验 未能读取前后值";const d=b-a;return"账号等级经验 "+a+" → "+b+"（"+(d>=0?"+":"")+d+"）"}
 function dailyExpNotice(a,b){if(a===null||b===null)return"每日普通任务经验 未能读取前后值";const d=b-a;return"每日普通任务经验 "+a+"/65 → "+b+"/65（"+(d>=0?"+":"")+d+"）"}
 
+function readSession(){
+ const raw=$persistentStore.read(SESSION);
+ if(raw){try{const value=JSON.parse(raw);if(value&&value.version===1&&typeof value.cookie==="string"&&value.meta)return value;}catch(_){}return{cookie:"",meta:null}}
+ return{cookie:$persistentStore.read(CK)||"",meta:readMeta()};
+}
 function readMeta(){const x=$persistentStore.read(MK);if(!x)return null;try{const v=JSON.parse(x);return v&&typeof v==="object"?v:null}catch(_){return null}}
 function parseCookie(x){const o={};String(x||"").split(";").forEach(z=>{const i=z.indexOf("=");if(i>0)o[z.slice(0,i).trim()]=z.slice(i+1)});return o}
 function form(o){return Object.keys(o).filter(k=>o[k]!=null).map(k=>encodeURIComponent(k)+"="+encodeURIComponent(String(o[k]))).join("&")}
