@@ -1,5 +1,5 @@
 #!name=贝蒂的基础面板
-#!desc=单面板：同 IP 多源归属、信誉信号、网站可达性、流量；手动刷新自适应测速（最多 128 MiB），自动刷新不测速。
+#!desc=1.4.1：同 IP 多源归属、信誉信号、网站可达性、流量；TikTok / Prime 按需 GET 复核；手动刷新自适应测速（最多 128 MiB），自动刷新不测速。
 #!category=🩺 网络工具
 #!system=ios
 # Copyright (c) 2026 BeatriceArchive

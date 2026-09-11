@@ -227,6 +227,102 @@ test('AI/site: network timeout is unreachable', async () => {
   const rt = runtime({ respond: () => null }); assert.equal((await rt.run("testAIReachable('https://claude.ai/','')")).state, 'unreachable');
 });
 
+const METHOD_FALLBACK_SITES = ['www.primevideo.com', 'www.tiktok.com'];
+for (const host of METHOD_FALLBACK_SITES) {
+  for (const status of [200, 301, 401, 403, 429, 451, 500]) test(`${host}: HEAD ${status} needs no GET`, async () => {
+    const rt = runtime({ respond: () => reply('', status, { location: 'https://other.invalid/login' }) });
+    const result = await rt.run(`testServiceReachable('https://${host}/','')`);
+    assert.equal(rt.calls.length, 1); assert.equal(rt.calls[0].method, 'head');
+    assert.equal(result.state, status < 400 ? 'reachable' : status === 500 ? 'unknown' : 'restricted');
+    assert.doesNotMatch(result.label, /GET|地区受限|解锁/);
+  });
+  for (const status of [405, 501]) test(`${host}: HEAD ${status} gets exactly one same-entry GET`, async () => {
+    const rt = runtime({ respond: q => reply('', q.method === 'head' ? status : 200) });
+    const result = await rt.run(`testServiceReachable('https://${host}/','Test Policy')`);
+    assert.equal(result.label, '可达 (GET 200)');
+    assert.deepEqual(rt.calls.map(q => q.method), ['head', 'get']);
+    assert.ok(rt.calls.every(q => q.url === `https://${host}/` && q.policy === 'Test Policy'));
+    assert.equal(rt.calls[1].timeout, 4);
+  });
+  for (const [status, state] of [[200, 'reachable'], [307, 'reachable'], [403, 'restricted'], [451, 'restricted'], [405, 'unknown'], [501, 'unknown'], [503, 'unknown']]) test(`${host}: fallback GET ${status} uses actual evidence without retry or redirect`, async () => {
+    const rt = runtime({ respond: q => reply('', q.method === 'head' ? 405 : status, { location: '/region/fe/', 'Set-Cookie': 'session=must-not-send' }) });
+    const result = await rt.run(`testServiceReachable('https://${host}/','')`);
+    assert.equal(result.state, state); assert.match(result.label, new RegExp(`GET ${status}`));
+    if (state === 'restricted') assert.match(result.label, new RegExp(`受限 ${status}`));
+    assert.equal(rt.calls.length, 2);
+    assert.ok(rt.calls.every(q => q['auto-redirect'] === false && q['auto-cookie'] === false));
+    for (const q of rt.calls) assert.ok(Object.keys(q.headers).every(k => !/^(cookie|authorization)$/i.test(k)));
+    assert.doesNotMatch(result.label, /地区受限|解锁|✓/);
+  });
+  for (const failure of [null, 'hang', { status: 200, error: 'fixture transport failure', responseOnError: true }]) test(`${host}: GET ${failure === 'hang' ? 'missing callback' : failure ? 'partial 200 with error' : 'network failure'} cannot be green`, async () => {
+    const rt = runtime({ respond: q => q.method === 'head' ? reply('', 405) : failure });
+    const result = await rt.run(`testServiceReachable('https://${host}/','')`);
+    assert.equal(result.state, 'unreachable'); assert.equal(rt.calls.length, 2);
+    assert.match(result.label, failure && failure !== 'hang' ? /GET 200\/传输失败/ : /GET 无响应/);
+    assert.ok(rt.now() - NOW <= 6010, 'GET fallback callback/watchdog is bounded');
+  });
+}
+
+for (const failure of [reply('', 0), null, 'hang', { error: 'HEAD unsupported', status: 200, responseOnError: true }]) test(`TikTok: HEAD ${failure === 'hang' ? 'missing callback' : failure?.status === 0 ? 'status zero' : 'transport failure'} may use one GET`, async () => {
+  const rt = runtime({ respond: q => q.method === 'head' ? failure : reply('', 200) });
+  assert.equal((await rt.run("testServiceReachable('https://www.tiktok.com/','')")).label, '可达 (GET 200)');
+  assert.deepEqual(rt.calls.map(q => q.method), ['head', 'get']);
+});
+
+test('TikTok: an explicit restriction with a transport error must not trigger another request', async () => {
+  const rt = runtime({ respond: () => ({ status: 403, error: 'fixture failure', responseOnError: true }) });
+  const result = await rt.run("testServiceReachable('https://www.tiktok.com/','')");
+  assert.notEqual(result.state, 'reachable'); assert.equal(rt.calls.length, 1);
+});
+
+test('website fallback: other services remain HEAD-only including method errors and network failure', async () => {
+  const urls = ['https://www.disneyplus.com/', 'https://open.spotify.com/', 'https://chatgpt.com/',
+    'https://claude.ai/', 'https://gemini.google.com/', 'https://chat.deepseek.com/', 'https://grok.com/', 'https://www.perplexity.ai/'];
+  for (const response of [reply('', 405), reply('', 501), null]) {
+    const rt = runtime({ respond: () => response });
+    await rt.run(`Promise.all(${JSON.stringify(urls)}.map(function (url) { return testServiceReachable(url, ''); }))`);
+    assert.equal(rt.calls.length, urls.length); assert.ok(rt.calls.every(q => q.method === 'head'));
+  }
+  const prime = runtime({ respond: () => null });
+  await prime.run("testServiceReachable('https://www.primevideo.com/','')");
+  assert.equal(prime.calls.length, 1, 'Prime transport errors alone do not broaden its fallback');
+});
+
+test('website fallback: default routing stays optional and raw body/errors never leak', async () => {
+  const secret = 'https://private.invalid/sub?token=SECRET Cookie=SECRET Authorization=SECRET';
+  const rt = runtime({ respond: q => q.method === 'head' ? reply('', 405, { 'Set-Cookie': secret }) :
+    { body: secret, error: secret, status: 200, responseOnError: true } });
+  const result = await rt.run("testServiceReachable('https://www.tiktok.com/','')");
+  assert.ok(rt.calls.every(q => !('policy' in q) && !('body' in q)));
+  assert.doesNotMatch(JSON.stringify([result, rt.logs, rt.writes, rt.calls]), /SECRET|private\.invalid/);
+});
+
+for (const state of ['reachable', 'restricted', 'unreachable', 'unknown']) test(`streaming summary: ${state} is counted without hiding failed checks`, async () => {
+  const rt = runtime();
+  const items = Array.from({ length: 6 }, (_, i) => ({ name: `Service ${i}`, state: i < 4 ? 'reachable' : state, label: state }));
+  const lines = await rt.run(`(function () { const lines = []; appendServiceLines(lines, '🎬 流媒体', ${JSON.stringify(items)}, true); return lines; })()`);
+  assert.match(lines[1], new RegExp(`可达 ${state === 'reachable' ? 6 : 4}/6`));
+  if (state !== 'reachable') assert.match(lines[1], new RegExp(`${{ restricted: '受限', unreachable: '不达', unknown: '未知' }[state]} 2`));
+  assert.doesNotMatch(lines[1], /受限 0|不达 0|未知 0/);
+  assert.equal(lines.length, 5, 'one summary and three paired service lines');
+});
+
+test('website fallback: auto refresh adds at most two GETs, does not speed test or change Geo/reputation', async () => {
+  const store = new Map();
+  const rt = runtime({ store, respond: q => METHOD_FALLBACK_SITES.some(host => q.url === `https://${host}/`) ? reply('', q.method === 'head' ? 405 : 403) : defaultReply(q) });
+  await rt.run('main()');
+  assert.equal(rt.calls.length, 20); assert.ok(rt.stats.peak <= 17);
+  assert.equal(rt.calls.filter(q => q.url.includes('/__down')).length, 0);
+  assert.match(rt.done[0].content, /流媒体 · 可达 4\/6 · 受限 2/);
+  assert.match(rt.done[0].content, /Geo 3\/3 一致 · ASN 3\/3 一致/);
+  assert.match(rt.done[0].content, /可比信号一致 2\/2 源/);
+  assert.match(rt.done[0].content, /TikTok 受限 403 \(GET 403\)/);
+  assert.doesNotMatch(rt.done[0].content, /地区受限/);
+  const next = runtime({ store, clockStart: NOW + 60000, respond: q => METHOD_FALLBACK_SITES.some(host => q.url === `https://${host}/`) ? reply('', q.method === 'head' ? 405 : 200) : defaultReply(q) });
+  await next.run('main()'); assert.equal(next.calls.length, 17);
+  assert.match(next.done[0].content, /TikTok 可达 \(GET 200\)/, 'HK Geo alone must not force restriction');
+});
+
 test('Netflix: full regional title-page evidence still does not claim playback unlock', async () => {
   const rt = runtime(); const result = await rt.run("testNetflix('')");
   assert.equal(result.label, '样片可达 🇭🇰'); assert.doesNotMatch(result.label, /解锁|完整/);

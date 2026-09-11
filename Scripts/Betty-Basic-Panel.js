@@ -1,6 +1,6 @@
 /*
  * 贝蒂的基础面板 - Surge iOS 单 Information Panel
- * Version: 1.4.0
+ * Version: 1.4.1
  *
  * 参数：
  * POLICY = 可选；留空时所有联网检测按 Surge 当前规则执行
@@ -110,7 +110,7 @@ async function main() {
   lines.push("", "⚡ 延迟 DIRECT " + fmtMs(results[2]) + " · " +
     (POLICY ? "指定策略 " : "当前规则 ") + fmtMs(results[3]));
   appendSpeedLines(lines, speed);
-  appendServiceLines(lines, "🎬 流媒体", media);
+  appendServiceLines(lines, "🎬 流媒体", media, true);
   appendServiceLines(lines, "✨ AI 网站", ai);
   lines.push("");
   appendUsageLines(lines, results[16]);
@@ -575,8 +575,26 @@ async function testYouTubePremium(policy) {
 function testDisney(policy) { return testServiceReachable("https://www.disneyplus.com/", policy); }
 
 async function testServiceReachable(url, policy) {
-  // HEAD tests the website/WAF only; no large page body or follow-up on 403/405.
-  return reachableResult(await http("head", url, policy, { autoRedirect: false, discardBody: true }));
+  const head = await http("head", url, policy, { autoRedirect: false, discardBody: true });
+  const tiktok = url === "https://www.tiktok.com/";
+  const prime = url === "https://www.primevideo.com/";
+  // Only these two real-device failures justify a method fallback. An explicit
+  // restriction must not cause another request, even with a transport error.
+  const restricted = head.status === 401 || head.status === 403 || head.status === 429 || head.status === 451;
+  const unsupported = head.status === 405 || head.status === 501;
+  const fallback = !restricted && (((tiktok || prime) && unsupported) || (tiktok && (!head.ok || !head.status)));
+  if (!fallback) return reachableResult(head);
+
+  // One GET to the same public entry only: no login, cookies, redirects or retry.
+  // discardBody drops data AFTER receipt, not on the wire. Range was ignored by
+  // TikTok in the 2026-09-11 probe; do not claim a byte cap or add a 416 failure path.
+  // Native timeout bounds the request; the http() watchdog bounds a missing callback.
+  const get = await http("get", url, policy, { timeout: 4, autoRedirect: false, discardBody: true });
+  const result = reachableResult(get);
+  const evidence = get.status ? String(get.status) + (get.ok ? "" : "/传输失败") : "无响应";
+  // Keep the actual fallback result visible for phone diagnosis; never log raw errors.
+  result.label += " (GET " + evidence + ")";
+  return result;
 }
 
 function testAIReachable(url, policy) { return testServiceReachable(url, policy); }
@@ -1345,10 +1363,18 @@ function formatOrganizationLine(exit) {
   return org + (asn ? " · AS" + asn : "");
 }
 
-function appendServiceLines(lines, title, items) {
+function appendServiceLines(lines, title, items, showFailures) {
   const reachable = items.filter(function (i) { return i.state === "reachable"; }).length;
   const restricted = items.filter(function (i) { return i.state === "restricted"; }).length;
-  lines.push("", title + " · 可达 " + reachable + "/6 · 受限 " + restricted);
+  let summary = title + " · 可达 " + reachable + "/" + items.length;
+  if (!showFailures || restricted) summary += " · 受限 " + restricted;
+  if (showFailures) {
+    const unreachable = items.filter(function (i) { return i.state === "unreachable"; }).length;
+    const unknown = items.filter(function (i) { return i.state === "unknown"; }).length;
+    if (unreachable) summary += " · 不达 " + unreachable;
+    if (unknown) summary += " · 未知 " + unknown;
+  }
+  lines.push("", summary);
   for (let i = 0; i < items.length; i += 2) lines.push(items.slice(i, i + 2).map(function (item) {
     return item.name + " " + item.label;
   }).join(" · "));
