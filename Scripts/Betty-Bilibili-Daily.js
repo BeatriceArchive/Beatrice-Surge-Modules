@@ -2,9 +2,10 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.7.0";
+const N="贝蒂的哔哩哔哩每日签到",V="1.8.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
+const SHARE_KEY="betty.bilibili.daily.share_attempt.";
 const MAX=5,TO=7,TTL=360000,COIN_MAX_WRITES=10,COIN_MAX_34004=3;
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 const HOME="https://www.bilibili.com/",ACC="https://account.bilibili.com/";
@@ -94,9 +95,9 @@ async function run(){
  const limited=fc!==null&&fc<MAX&&bal===0,coinOK=fc!==null&&(fc>=MAX||limited);
  const coreOK=!!(st.login&&st.watch&&coinOK&&vip.done!==false),shareOK=!!st.share,ct=fc===null?"未知/5":fc+"/5";
  const daily0=taskExp(st0,fx0,c0),daily1=taskExp(st,fx,fc),vipShort=vipPanel(vip);
- if(coreOK){
-  const lead=shareOK?"✅ 今日核心任务已完成":"✅ 核心任务已完成｜分享未完成";
-  panel=P(lead+"｜投币 "+ct+"｜"+vipShort,shareOK?"checkmark.circle.fill":"exclamationmark.triangle.fill",shareOK?"#34C759":"#FF9F0A");
+ if(coreOK&&shareOK){
+  const lead="✅ 今日任务已完成";
+  panel=P(lead+"｜投币 "+ct+"｜"+vipShort,"checkmark.circle.fill","#34C759");
  }else{
   panel=P(["⚠️ 今日核心任务部分完成","投币 "+ct,shareOK?"分享✅":"分享❌",vipShort].join("｜"),"exclamationmark.triangle.fill","#FF9F0A");
  }
@@ -111,7 +112,7 @@ async function run(){
   "硬币余额 "+(bal===null?"未知":bal)
  ];
  if(errs.length)lines.push("异常："+errs.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
- notify(coreOK?(shareOK?"✅ 今日可执行任务已完成":"✅ 核心任务完成｜分享未完成"):"⚠️ 今日核心任务部分完成",lines.join("\n"));
+ notify(coreOK&&shareOK?"✅ 今日可执行任务已完成":"⚠️ 今日任务部分完成",lines.join("\n"));
 }
 
 async function vipExperience(csrf,cookie,user,watchDone,beforeExp){
@@ -146,7 +147,7 @@ async function watch(list,uid,csrf,cookie){
   let b=await hb(v,uid,csrf,cookie,0,0),e=classify(b,"观看");if(e)return{err:e,video:null};if(code(b)!==0)continue;
   await sleep(800);const t=rand(1,Math.max(1,Math.min(15,v.duration||15)));
   b=await hb(v,uid,csrf,cookie,t,t);e=classify(b,"观看");if(e)return{err:e,video:null};
-  if(code(b)===0){await sleep(500);const s=await status(cookie,0);if(!s||s.watch)return{err:null,video:v}}
+  if(code(b)===0){await sleep(500);const s=await status(cookie,0);if(s&&s.watch)return{err:null,video:v}}
   if(code(b)===null){await sleep(500);const s=await status(cookie,0);if(s&&s.watch)return{err:null,video:v}}
  }
  return{err:op("观看",null,"未确认观看完成"),video:null};
@@ -154,15 +155,34 @@ async function watch(list,uid,csrf,cookie){
 function hb(v,uid,csrf,cookie,t,rt){return postForm(A.hb+"?aid="+encodeURIComponent(v.aid)+"&played_time="+t,form({aid:v.aid,bvid:v.bvid,cid:v.cid,mid:uid,played_time:t,realtime:rt,real_played_time:rt,start_ts:Math.floor(Date.now()/1000)-rt,type:3,dt:2,play_type:3,csrf}),cookie,HOME+"video/"+v.bvid)}
 
 async function share(list,watched,uid,csrf,cookie){
+ const before=await get(A.daily,cookie,HOME,0),beforeError=classify(before,"分享状态");
+ if(beforeError)return beforeError;
+ if(!before||code(before)!==0||!before.data||typeof before.data.share!=="boolean")return op("分享",null,"无法查询任务状态，未执行写入");
+ if(before.data.share)return null;
+ const day=new Date(Date.now()+8*3600000).toISOString().slice(0,10),key=SHARE_KEY+uid;
+ const saved=$persistentStore.read(key);let attempt=null;
+ if(saved){try{attempt=JSON.parse(saved);if(!attempt||typeof attempt.day!=="string")throw new Error();}catch(_){return op("分享",null,"本地尝试记录损坏，已停止写入")}}
+ if(attempt&&attempt.day===day)return confirmShare(cookie,attempt,key);
  let v=watched;
  if(!v)for(let i=0;i<Math.min(list.length,4);i++){v=await video(list[i],cookie);if(v)break}
  if(!v)return op("分享",null,"没有可用视频");
- await sleep(rand(1000,2500));
- const b=await postForm(A.share,form({aid:v.aid,csrf,eab_x:1,ramval:rand(3,19),source:"web_normal",ga:1}),cookie,HOME+"video/"+v.bvid),e=classify(b,"分享");
- if(e)return e;if(code(b)===0)return null;
- if(code(b)===71000){const s=await status(cookie,0);return s&&s.share?null:op("分享",71000,"重复分享但状态未确认")}
- if(code(b)===null){const s=await status(cookie,0);return s&&s.share?null:op("分享",null,"分享结果不确定，已停止重复写入")}
- return op("分享",code(b),reason(b,"分享未完成"));
+ // Persist before sending: a timeout or killed script must not cause another write.
+ attempt={day,requestSucceeded:false,code:null,confirmed:false};
+ if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
+ const b=await postForm(A.share,form({aid:v.aid,csrf,eab_x:1,ramval:3,source:"web_normal",ga:1}),cookie,HOME+"video/"+v.bvid),e=classify(b,"分享");
+ attempt.code=code(b);attempt.requestSucceeded=code(b)===0;
+ $persistentStore.write(JSON.stringify(attempt),key);
+ if(e)return e;
+ return confirmShare(cookie,attempt,key);
+}
+async function confirmShare(cookie,attempt,key){
+ for(const delay of [0,1200,2500]){
+  if(delay)await sleep(delay);
+  const b=await get(A.daily,cookie,HOME,0),e=classify(b,"分享确认");
+  if(e)return e;
+  if(b&&code(b)===0&&b.data&&b.data.share===true){attempt.confirmed=true;$persistentStore.write(JSON.stringify(attempt),key);return null}
+ }
+ return op("分享",attempt.code,attempt.requestSucceeded?"请求已接受，但每日分享任务未确认；今日不再重复写入":"每日分享任务未确认；今日写入次数已用尽");
 }
 
 async function coins(list,goal,start,uid,csrf,cookie){
@@ -204,8 +224,8 @@ function bad(r){panel=P("❌ Cookie 已失效｜请重新扫码","xmark.circle.f
 function vipPanel(v){return v.done===null?"大会员经验➖":v.done?"大会员经验✅":"大会员经验⚠️"}
 function vipNotice(v){if(v.done===null)return"大会员经验 ➖ 非大会员";if(v.done)return"大会员经验 ✅ "+v.label;const c=v.err&&v.err.code!=null?" code "+v.err.code:"";return"大会员经验 ❌ "+v.label+c}
 function currentLevelExp(u){return num(u&&u.level_info&&u.level_info.current_exp)}
-function taskExp(s,fx,fc){if(!s)return null;const coin=Number.isFinite(Number(fx))?Math.max(0,Math.min(50,Number(fx))):(fc==null?0:Math.max(0,Math.min(5,fc))*10);return(s.login?5:0)+(s.watch?5:0)+(s.share?5:0)+coin}
-function taskNotice(name,before,after,err){if(after)return name+" ✅ "+(before?"已完成":"本次完成");const c=err&&err.code!=null?" code "+err.code:"";return name+" ❌ 未完成"+c}
+function taskExp(s,fx,fc){if(!s)return null;const raw=num(fx);if(raw===null&&fc==null)return null;const coin=raw!==null?Math.max(0,Math.min(50,raw)):Math.max(0,Math.min(5,fc))*10;return(s.login?5:0)+(s.watch?5:0)+(s.share?5:0)+coin}
+function taskNotice(name,before,after,err){if(after)return name+" ✅ "+(before?"已完成":"本次完成");const c=err&&err.code!=null?" code "+err.code:"";return name+" ❌ 未完成"+c+(err&&err.message?"｜"+err.message:"")}
 function coinNotice(before,after,limited,err,meta){const b=before==null?"未知":before,a=after==null?"未知":after,delta=before!=null&&after!=null?Math.max(0,after-before):null;let s="投币 "+(after==null?"未知/5":after+"/5")+(delta!=null?"｜本次 +"+delta+" 枚":"");if(meta)s+="｜写入 "+meta.writes+" 次"+(meta.hit34004?"｜34004×"+meta.hit34004:"");if(limited)s+="｜余额不足";else if(err)s+="｜停止 code "+(err.code==null?"未知":err.code);if(b!=="未知"&&a!=="未知"&&b===a&&err)s+="｜本轮未增加";return s}
 function levelExpNotice(a,b){if(a===null||b===null)return"账号等级经验 未能读取前后值";const d=b-a;return"账号等级经验 "+a+" → "+b+"（"+(d>=0?"+":"")+d+"）"}
 function dailyExpNotice(a,b){if(a===null||b===null)return"每日普通任务经验 未能读取前后值";const d=b-a;return"每日普通任务经验 "+a+"/65 → "+b+"/65（"+(d>=0?"+":"")+d+"）"}
@@ -216,7 +236,7 @@ function form(o){return Object.keys(o).filter(k=>o[k]!=null).map(k=>encodeURICom
 function parse(v){if(v==null||v==="")return null;try{return typeof v==="string"?JSON.parse(v):v}catch(_){return null}}
 function num(v){if(v==null||v==="")return null;const n=Number(v);return Number.isFinite(n)?n:null}
 function int(v){const n=num(v);return n===null||n<0?null:Math.floor(n)}
-function code(b){const c=num(b&&b.code);return c!==null?c:num(b&&b.__httpStatus)}
+function code(b){const h=num(b&&b.__httpStatus);if(h!==null&&(h<200||h>=300))return h;const c=num(b&&b.code);return c!==null?c:null}
 function logged(b){return!!(b&&code(b)===0&&b.data&&b.data.isLogin===true)}
 function reason(b,f){if(!b)return f;const c=code(b),m=txt(b.message||b.msg||f,120);return c===null?m:c+" "+m}
 function coinCount(x){const n=num(x);return n===null||n<0?null:Math.max(0,Math.min(MAX,Math.floor(n/10)))}

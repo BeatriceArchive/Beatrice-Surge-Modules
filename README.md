@@ -26,7 +26,7 @@ GitHub 平台本身允许的查看与 Fork 权利仍以 GitHub 条款为准，�
 
 贝蒂的基础面板。
 
-用于汇总本地网络、出口 IP、DNS、延迟、测速、流媒体、AI 可达性、当前配置剩余流量与 IP 风险信息。
+用于汇总本地网络、出口 IP、DNS、延迟、下载速度估算、流媒体、AI 可达性、当前配置剩余流量与 IP 风险信息。下载测速仅由用户点击触发，自动刷新不测速；单次测试最多请求约 70.5 MiB（含探测），蜂窝网络同样消耗流量。结果按成功接收字节与实际耗时计算，不加经验倍率；快速测试仅为估算，可达性也不代表完整解锁。
 
 安装地址：
 
@@ -40,7 +40,9 @@ https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Mo
 
 大会员账号会额外领取每日“专属等级加速包”对应的 +10 主站账号等级经验。脚本会先确保当日观看任务已经完成，再调用 `/x/vip/experience/add` 领取；成功返回后会再次读取 `/nav` 的 `level_info.current_exp` 验证经验变化。若接口返回 `69198`，视为当天已经领取。非大会员安全跳过。该 +10 EXP 与普通登录、观看、分享、投币组成的 65 EXP 每日任务分开显示，因此大会员当日理论最高可获得 75 点等级经验。
 
-分享保留为 best-effort：只进行一次受控写入尝试。分享失败只在 Panel 与通知中单独标记，不再阻断大会员经验、投币或“核心任务完成”的判定；Cookie/CSRF 失效或账号封停等全局认证问题仍会停止后续写操作。
+分享必须由 `/x/member/web/exp/reward` 返回 `share: true` 才显示完成；HTTP 200 或 `code=0` 只表示请求被接受。写入前先读取任务状态，每个账号每个北京时间自然日最多一次 `/x/web-interface/share/add` POST，写入前持久化尝试记录，避免超时、重复手动执行或脚本重启造成重复写入。之后最多三次确认读取（等待 0、1.2、2.5 秒）；未确认就明确显示“分享未确认”和任务部分完成，不能显示整日成功。再次执行只读取状态，不重复写入；状态不可读时不发起分享。认证失效仍停止后续写操作。
+
+该机制保证状态报告和写入上限，不保证 Bilibili 风控环境一定给分享任务记账。实际账号的任务归因仍需下一次真实执行验证；脚本不通过改随机参数、切换未知接口或连续分享多个视频绕过限制。
 
 投币按“最多 5 枚、扣除今日已投、再受当前余额限制”的规则计算目标。脚本以 `/x/web-interface/coin/today/exp` 为主状态源，并以 `/x/member/web/exp/reward` 的 `coins` 经验值作为备用；每次写入前核对当前视频已投数量，原创最多 2 枚、转载最多 1 枚，每次只写 1 枚。投币表单使用 Web 端成熟实现常见的 `cross_domain=true`、`eab_x=2`、`ramval=3`、`source=web_normal`、`ga=1`，同时固定 `select_like=0`，不会自动点赞。`34004` 等可恢复错误会有限换视频重试；`403` 会立即停止本轮后续投币写入，避免继续顶风控。
 
@@ -52,7 +54,7 @@ Cookie 获取与 Daily 任务不强制指定 DIRECT，而是按 Surge 当前规�
 
 如果已经生成二维码但忘记截图，只要当前二维码仍在有效期内，再次点击 Cookie Panel 刷新即可重新显示同一张二维码，不会创建第二个登录事务。为支持这一容错，二维码内容仅在 Surge 本地临时保存，并在成功、失败或超时后清除；不会写入仓库、日志或发送给第三方服务。收到“✅ Cookie 已验证并保存”后 Daily 即可使用。
 
-两个 Panel 的自动刷新仅读取 Surge 本地状态，不会自动创建登录事务或执行 Daily 写任务。Cookie 工具不使用 MITM、CA 或 HTTPS 解密，不需要修改托管 Profile，也不需要创建本地配置副本。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
+两个 Panel 的自动刷新仅读取 Surge 本地状态，不会自动创建登录事务或执行 Daily 写任务。Cookie 工具不使用 MITM、CA 或 HTTPS 解密，不需要修改托管 Profile，也不需要创建本地配置副本。带 Cookie 的请求禁用自动重定向；非 2xx 响应不能视为成功。账号 Cookie 仅保存于 Surge 本地持久化存储，不写入仓库，也不会发送给第三方服务。
 
 Surge 当前官方 Panel 语法没有跨模块全局排序字段，因此 Bilibili 面板与基础面板的显示顺序主要由用户本地模块顺序决定。
 
@@ -65,3 +67,12 @@ Cookie 获取模块安装地址：
 https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Cookie.sgmodule
 
 后续每新增一个模块，都在此 README.md 中继续追加模块名称和用途说明。
+
+## 验证
+
+```sh
+node scripts/validate-modules.mjs
+node --test tests/*.test.mjs
+```
+
+行为测试在隔离的 mock Surge 环境运行，不使用真实 Cookie，不触发真实 Bilibili 写入。

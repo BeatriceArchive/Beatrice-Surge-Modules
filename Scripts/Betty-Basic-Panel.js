@@ -1604,7 +1604,7 @@ function appendSpeedLines(lines, speed) {
   }
 
   lines.push(
-    "⚡ 下载 " + formatFixed(speed.mbps, 1) + " Mbps" +
+    "⚡ 下载估算 " + formatFixed(speed.mbps, 1) + " Mbps" +
     " · " + formatFixed(speed.mbPerSecond, 2) + " MB/s"
   );
   lines.push(speedResultBar(speed.mbps));

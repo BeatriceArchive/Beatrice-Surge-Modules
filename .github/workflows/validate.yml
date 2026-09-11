@@ -26,3 +26,7 @@ jobs:
 
       - name: Validate module metadata and script references
         run: node scripts/validate-modules.mjs
+      - name: Run isolated behavior tests
+        run: node --test tests/*.test.mjs
+      - name: Check script syntax
+        run: for script in Scripts/*.js; do node --check "$script"; done
