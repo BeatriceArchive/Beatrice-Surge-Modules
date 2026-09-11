@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.9.0";
+const N="贝蒂的哔哩哔哩每日签到",V="1.10.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -179,7 +179,8 @@ async function share(list,watched,uid,csrf,cookie){
  if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
  attempt={version:2,day,requestSucceeded:false,code:null,confirmed:false};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
- const b=await postForm(A.share,form({bvid:v.bvid,csrf}),cookie,HOME+"video/"+v.bvid+"/"),e=classify(b,"分享");
+ // Fixed task-oriented request, aligned with current BLTH. No parameter retries.
+ const b=await postForm(A.share,form({aid:v.aid,csrf,source:"pc_client_normal",eab_x:2,ramval:0,ga:1}),cookie,HOME+"video/"+v.bvid+"/"),e=classify(b,"分享");
  attempt.code=code(b);attempt.requestSucceeded=code(b)===0;
  $persistentStore.write(JSON.stringify(attempt),key);
  if(e&&e.fatal)return e;

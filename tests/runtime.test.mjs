@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
-function runtime(name, { store = new Map(), respond = () => ({ code: 0 }), trigger = 'button', failStore = false, now = () => Date.now(), onWrite = () => {} } = {}) {
+function runtime(name, { store = new Map(), respond = () => ({ code: 0 }), trigger = 'button', input = { purpose: 'panel', panelName: name }, script = { name, type: 'generic' }, failStore = false, now = () => Date.now(), onWrite = () => {} } = {}) {
   const calls = [], notices = [], writes = [], completions = [];
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now()])); } static now() { return now(); } }
   const context = vm.createContext({
     console: { log() {} }, Date: Clock, Math, Uint8Array, ArrayBuffer,
     setTimeout: fn => { queueMicrotask(fn); return 1; }, clearTimeout() {},
-    $input: { purpose: 'panel' }, $trigger: trigger, $argument: '',
+    $input: input, $trigger: trigger, $script: script, $argument: '',
     $persistentStore: { read: k => store.get(k) || '', write: (v, k) => {
       if (typeof failStore === 'function' ? failStore(k, v) : failStore) return false;
       onWrite(k, v); writes.push({ key: k, value: v }); store.set(k, v); return true;
@@ -52,9 +52,9 @@ test('share: delayed official completion confirms success with one write', async
   assert.equal(await shareRun(rt), null);
   const sent = rt.calls.find(x => x.method === 'post');
   assert.equal(new URL(sent.url).pathname, '/x/web-interface/share/add');
-  assert.deepEqual([...new URLSearchParams(sent.body).keys()].sort(), ['bvid', 'csrf']);
-  assert.equal(new URLSearchParams(sent.body).get('bvid'), video.bvid);
-  assert.equal(new URLSearchParams(sent.body).get('csrf'), 'csrf-fixture');
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(sent.body)), {
+    aid: String(video.aid), csrf: 'csrf-fixture', source: 'pc_client_normal', eab_x: '2', ramval: '0', ga: '1'
+  });
   assert.equal(sent.headers.Origin, 'https://www.bilibili.com');
   assert.equal(sent.headers.Referer, `https://www.bilibili.com/video/${video.bvid}/`);
   assert.equal(sent['auto-redirect'], false);
@@ -414,4 +414,276 @@ test('daily: confirmed envelope is used even when stale compatibility mirrors re
   await rt.start();
   assert.match(rt.completions[0].content, /今日任务已完成/);
   assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+});
+
+const TEST_ENTRY = 'Betty-Bilibili-Share-Test';
+const TEST_DAY = '2026-09-11';
+const TEST_NOW = Date.parse(TEST_DAY + 'T13:00:00Z');
+const TEST_ATTEMPT = `betty.bilibili.daily.share_test.42.${TEST_DAY}`;
+const DAILY_PANEL = 'betty.bilibili.daily.panel_state';
+function manualFixture({ reply = { code: 0, message: '0' }, confirmation = false, before = false, store = priorSession(true), ...options } = {}) {
+  const dailyAttempt = JSON.stringify({ version: 2, day: TEST_DAY, code: -403, confirmed: false });
+  if (!store.has(SH)) store.set(SH, dailyAttempt);
+  if (!store.has(DAILY_PANEL)) store.set(DAILY_PANEL, 'unchanged Daily panel');
+  let rewardReads = 0;
+  return runtime(TEST_ENTRY, { store, now: () => TEST_NOW, respond: (q, method) => {
+    assert.equal(new URL(q.url).hostname, 'api.bilibili.com');
+    if (method === 'post') {
+      assert.equal(new URL(q.url).pathname, '/x/web-interface/share/add', 'only share may write');
+      assert.equal(JSON.parse(store.get(TEST_ATTEMPT)).phase, 'reserved', 'reservation exists before POST');
+      return reply;
+    }
+    if (q.url.endsWith('/nav')) return { code: 0, data: { isLogin: true, mid: 42, money: 99, vipStatus: 1 } };
+    if (q.url.endsWith('/exp/reward')) {
+      rewardReads++;
+      const value = rewardReads === 1 ? before : typeof confirmation === 'function' ? confirmation(rewardReads - 1) : confirmation;
+      return value === null ? null : state(value);
+    }
+    if (q.url.includes('/ranking/v2?')) return { code: 0, data: { list: [video] } };
+    throw new Error('Unexpected non-share task request: ' + new URL(q.url).pathname);
+  }, ...options });
+}
+
+for (const scenario of [
+  { name: 'cron timer', trigger: null, input: null, script: { name: TEST_ENTRY, type: 'cron' } },
+  { name: 'cron masquerading as a button', script: { name: TEST_ENTRY, type: 'cron' } },
+  { name: 'automatic panel refresh', trigger: 'auto-interval' },
+  { name: 'ordinary Daily panel', input: { purpose: 'panel', panelName: 'Betty-Bilibili-Daily-Panel' } },
+  { name: 'ordinary Daily script name', script: { name: 'Betty-Bilibili-Daily-Panel', type: 'generic' } },
+  { name: 'script editor', trigger: 'editor' },
+  { name: 'HTTP API', trigger: 'http-api' },
+  { name: 'Shortcuts automation', trigger: 'intent' },
+  { name: 'missing panel context', input: null },
+  { name: 'missing script context', script: null }
+]) {
+  test(`manual share: ${scenario.name} cannot trigger a test or any network request`, async () => {
+    const rt = manualFixture(scenario);
+    await rt.start();
+    assert.equal(rt.calls.length, 0);
+    assert.equal(rt.writes.length, 0);
+    assert.equal(rt.notices.length, 0);
+    assert.equal(rt.completions.length, 1);
+  });
+}
+
+test('manual share: actual module wiring has only a generic entry and explicit manual panel', async () => {
+  const text = readFileSync(new URL('../Modules/Betty-Bilibili-Share-Test.sgmodule', import.meta.url), 'utf8');
+  const line = text.split('[Script]')[1].trim();
+  assert.equal(line.split('\n').length, 1);
+  assert.match(line, /^Betty-Bilibili-Share-Test = type=generic,/);
+  const path = line.match(/script-path=([^,]+)/)[1];
+  assert.equal(new URL(path).pathname, '/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Share-Test.js');
+  const panelLine = text.split('[Panel]')[1].split('[Script]')[0].trim();
+  assert.match(panelLine, /^Betty-Bilibili-Share-Test = /);
+  assert.match(panelLine, /script-name=Betty-Bilibili-Share-Test$/);
+  assert.doesNotMatch(panelLine, /update-interval=/);
+  const rt = manualFixture({ script: { name: line.split(' = ')[0], type: 'generic' }, input: { purpose: 'panel', panelName: panelLine.split(' = ')[0] } });
+  await rt.start();
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 1);
+});
+
+test('manual share: one extra PC-client write; no watch, coin, VIP, Daily attempt or Cookie mutation', async () => {
+  const rt = manualFixture();
+  const protectedKeys = [SH, CK, META, SESSION, DAILY_PANEL];
+  const before = protectedKeys.map(k => rt.store.get(k));
+  await rt.start();
+  const posts = rt.calls.filter(q => q.method === 'post');
+  assert.equal(posts.length, 1);
+  const sent = posts[0];
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(sent.body)), { aid: '123', csrf: 'old-csrf', source: 'pc_client_normal', eab_x: '2', ramval: '0', ga: '1' });
+  assert.equal(sent.headers.Origin, 'https://www.bilibili.com');
+  assert.equal(sent.headers.Referer, 'https://www.bilibili.com/video/BV1234567890/');
+  assert.equal(sent.headers.Cookie, oldCookie);
+  assert.match(sent.headers.Cookie, /buvid3=old-device/);
+  assert.equal(sent['auto-redirect'], false);
+  assert.equal(sent['auto-cookie'], false);
+  assert.equal(Object.keys(sent.headers).some(k => /^sec-/i.test(k)), false);
+  assert.deepEqual(protectedKeys.map(k => rt.store.get(k)), before);
+  assert.equal(rt.writes.some(w => protectedKeys.includes(w.key)), false);
+  assert.deepEqual([...new Set(rt.calls.map(q => new URL(q.url).pathname))].sort(), ['/x/member/web/exp/reward', '/x/web-interface/nav', '/x/web-interface/ranking/v2', '/x/web-interface/share/add']);
+  const daily = runtime('Betty-Bilibili-Daily', { now: () => TEST_NOW, respond: (_, method) => method === 'post' ? { code: 0 } : state(false) });
+  daily.context.fixtureVideo = video;
+  await daily.run("share([],fixtureVideo,'42','old-csrf'," + JSON.stringify(oldCookie) + ')');
+  const normal = daily.calls.find(q => q.method === 'post');
+  assert.equal(normal.body, sent.body, 'normal and manual use exactly the same form');
+  assert.deepEqual({ ...normal.headers }, { ...sent.headers }, 'same UA, Cookie and request context');
+});
+
+for (const scenario of [
+  { name: 'code 0 and immediate official share=true', reply: { code: 0, message: '0' }, confirmation: true, state: 'true', result: 'CONFIRMED / 官方任务已完成', reads: 2 },
+  { name: 'code 0 and delayed share=true', reply: { code: 0, message: '0' }, confirmation: n => n >= 2, state: 'true', result: 'CONFIRMED / 官方任务已完成', reads: 3 },
+  { name: 'code 0 but share=false', reply: { code: 0, message: '0' }, confirmation: false, state: 'false', result: 'REQUEST ACCEPTED BUT NOT CREDITED', reads: 4 },
+  { name: '-403 and share=false', reply: { code: -403, message: '账号异常,操作失败' }, confirmation: false, state: 'false', result: 'REQUEST REJECTED BY BILIBILI', reads: 4 },
+  { name: 'POST network failure', reply: null, confirmation: false, state: 'false', result: 'NOT CONFIRMED / 未确认', reads: 4 },
+  { name: 'confirmation network failure', reply: { code: 0, message: '0' }, confirmation: null, state: 'UNKNOWN', result: 'NOT CONFIRMED / 请求接受，官方状态未知', reads: 4 },
+  { name: 'HTTP 403 with misleading code 0', reply: http(403, { code: 0 }), confirmation: false, state: 'false', result: 'REQUEST REJECTED BY BILIBILI', reads: 4 },
+  { name: 'HTTP 500 with misleading code 0', reply: http(500, { code: 0 }), confirmation: false, state: 'false', result: 'NOT CONFIRMED / 未确认', reads: 4 }
+]) {
+  test(`manual share: ${scenario.name} preserves request evidence and never repeats POST`, async () => {
+    const rt = manualFixture(scenario);
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 1);
+    assert.equal(rt.calls.filter(q => q.url.endsWith('/exp/reward')).length, scenario.reads);
+    const postIndex = rt.calls.findIndex(q => q.method === 'post');
+    assert.ok(rt.calls[postIndex + 1].url.endsWith('/exp/reward'), 'confirmation starts immediately after POST');
+    const content = rt.completions[0].content;
+    assert.ok(content.includes('RESULT: ' + scenario.result));
+    assert.ok(content.includes('OFFICIAL SHARE STATE: ' + scenario.state));
+    assert.ok(content.includes('REQUEST CODE: '));
+    assert.ok(content.includes('REQUEST MESSAGE: '));
+    const record = JSON.parse(rt.store.get(TEST_ATTEMPT));
+    assert.equal(record.mode, 'manual-share-test');
+    assert.equal(record.confirmed, scenario.state === 'true');
+    const resumed = manualFixture({ store: rt.store });
+    await resumed.start();
+    assert.equal(resumed.calls.filter(q => q.method === 'post').length, 0);
+    assert.match(resumed.completions[0].content, /本日测试机会已用/);
+    assert.equal(resumed.store.get(TEST_ATTEMPT), rt.store.get(TEST_ATTEMPT), 'original evidence remains unchanged');
+  });
+}
+
+test('manual share: already shared or unknown preflight never consumes a write', async () => {
+  for (const before of [true, null]) {
+    const rt = manualFixture({ before });
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.equal(rt.store.has(TEST_ATTEMPT), false);
+    assert.match(rt.completions[0].content, /REQUEST CODE: NOT SENT/);
+  }
+});
+
+for (const malformed of ['{', 'null', '{}', '[]', 'false', '{"version":1,"mode":"manual-share-test","day":"2026-09-10"}']) {
+  test(`manual share: malformed local record ${malformed} blocks writes only for its date`, async () => {
+    const store = priorSession();store.set(TEST_ATTEMPT, malformed);
+    const rt = manualFixture({ store });await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.equal(store.get(TEST_ATTEMPT), malformed);
+    assert.match(rt.completions[0].content, /记录损坏/);
+    const next = manualFixture({ store, now: () => TEST_NOW + 86400000, respond: (q, method) => {
+      if (method === 'post') return { code: -403, message: '账号异常,操作失败' };
+      if (q.url.endsWith('/nav')) return { code: 0, data: { isLogin: true, mid: 42 } };
+      if (q.url.endsWith('/exp/reward')) return state(false);
+      return { code: 0, data: { list: [video] } };
+    } });
+    await next.start();
+    assert.equal(next.calls.filter(q => q.method === 'post').length, 1);
+    assert.equal(store.get(TEST_ATTEMPT), malformed);
+  });
+}
+
+test('manual share: reserved record survives killed run and cannot be used twice', async () => {
+  const rt = manualFixture({ reply: null });await rt.start();
+  const reserved = rt.writes.find(w => w.key === TEST_ATTEMPT).value;
+  rt.store.set(TEST_ATTEMPT, reserved);
+  const next = manualFixture({ store: rt.store });await next.start();
+  assert.equal(next.calls.filter(q => q.method === 'post').length, 0);
+  assert.match(next.completions[0].content, /REQUEST CODE: UNKNOWN/);
+});
+
+test('manual share: failed reservation prevents POST; failed result writes keep reservation', async () => {
+  const blocked = manualFixture({ failStore: k => k === TEST_ATTEMPT });await blocked.start();
+  assert.equal(blocked.calls.filter(q => q.method === 'post').length, 0);
+  const rt = manualFixture({ failStore: (k, v) => k === TEST_ATTEMPT && JSON.parse(v).phase !== 'reserved' });await rt.start();
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 1);
+  assert.equal(JSON.parse(rt.store.get(TEST_ATTEMPT)).phase, 'reserved');
+  const again = manualFixture({ store: rt.store });await again.start();
+  assert.equal(again.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('manual share: missing buvid3, UID mismatch and network auth failure never write or change Cookie', async () => {
+  for (const failure of ['missing-buvid3', 'uid-mismatch', 'nav-network']) {
+    const store = priorSession(true);
+    if (failure === 'missing-buvid3') store.set(SESSION, JSON.stringify({ version: 1, cookie: oldCookie.replace('; buvid3=old-device', ''), meta: oldMeta }));
+    const previous = store.get(SESSION);
+    const rt = manualFixture({ store, respond: () => failure === 'nav-network' ? null : { code: 0, data: { isLogin: true, mid: 84 } } });
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.equal(store.get(SESSION), previous);
+    assert.equal(store.has(TEST_ATTEMPT), false);
+  }
+});
+
+test('manual share: shared Daily lock prevents overlap, including concurrent manual clicks', async () => {
+  const store = priorSession();
+  store.set('betty.bilibili.daily.run_lock', JSON.stringify({ owner: 'daily', expiresAt: TEST_NOW + 60000 }));
+  const rt = manualFixture({ store });await rt.start();
+  assert.equal(rt.calls.length, 0);
+  assert.equal(JSON.parse(store.get('betty.bilibili.daily.run_lock')).owner, 'daily');
+  store.delete('betty.bilibili.daily.run_lock');
+  const first = manualFixture({ store }), second = manualFixture({ store });
+  await Promise.all([first.start(), second.start()]);
+  assert.equal([...first.calls, ...second.calls].filter(q => q.method === 'post').length, 1);
+});
+
+test('manual share: Cookie values never enter diagnostics or test records, even if echoed', async () => {
+  const rt = manualFixture({ reply: { code: -403, message: oldCookie } });await rt.start();
+  const output = JSON.stringify([rt.notices, rt.completions, rt.store.get(TEST_ATTEMPT)]);
+  for (const value of ['old-fixture', 'old-csrf', 'old-device', 'DedeUserID=42']) assert.equal(output.includes(value), false);
+});
+
+test('normal Daily: same-day guard survives a manual test; only confirmed state completes the task', async () => {
+  const rt = manualFixture();await rt.start();
+  const daily = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => TEST_NOW, respond: () => state(false) });
+  assert.ok(await shareRun(daily));
+  assert.equal(daily.calls.filter(q => q.method === 'post').length, 0);
+  const confirmed = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => TEST_NOW, respond: () => state(true) });
+  assert.equal(await shareRun(confirmed), null);
+  assert.equal(confirmed.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('manual share: failed recheck preserves the original -403 diagnostic and never says NOT SENT', async () => {
+  const first = manualFixture({ reply: { code: -403, message: '账号异常,操作失败' } });await first.start();
+  const saved = first.store.get(TEST_ATTEMPT);
+  const retry = manualFixture({ store: first.store, before: null });await retry.start();
+  const content = retry.completions[0].content;
+  assert.match(content, /REQUEST CODE: -403/);
+  assert.match(content, /REQUEST MESSAGE: 账号异常,操作失败/);
+  assert.match(content, /OFFICIAL SHARE STATE: UNKNOWN/);
+  assert.doesNotMatch(content, /REQUEST CODE: NOT SENT/);
+  assert.equal(retry.calls.filter(q => q.method === 'post').length, 0);
+  assert.equal(retry.store.get(TEST_ATTEMPT), saved);
+});
+
+test('manual share: malformed or redirected official responses never confirm completion', async () => {
+  for (const response of [
+    { code: false, data: { share: true } }, { code: ' ', data: { share: true } },
+    { code: 0, data: { share: 'true' } }, http(302, state(true)), http(null, state(true))
+  ]) {
+    const rt = manualFixture({ respond: q => q.url.endsWith('/nav') ? { code: 0, data: { isLogin: true, mid: 42 } } : response });
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.match(rt.completions[0].content, /OFFICIAL SHARE STATE: UNKNOWN/);
+    assert.match(rt.completions[0].content, /NOT CONFIRMED/);
+  }
+});
+
+for (const rollover of ['before POST', 'after POST']) {
+  test(`manual share: Beijing day rollover ${rollover} cannot spend or confirm the wrong day`, async () => {
+    let clock = TEST_NOW;
+    const rt = manualFixture({ now: () => clock, respond: (q, method) => {
+      if (q.url.endsWith('/nav')) return { code: 0, data: { isLogin: true, mid: 42 } };
+      if (q.url.endsWith('/exp/reward')) return state(clock !== TEST_NOW);
+      if (q.url.includes('/ranking/v2?')) { if (rollover === 'before POST') clock += 86400000; return { code: 0, data: { list: [video] } }; }
+      if (method === 'post') { clock += 86400000; return { code: 0, message: '0' }; }
+      throw new Error('Unexpected request');
+    } });
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, rollover === 'before POST' ? 0 : 1);
+    assert.match(rt.completions[0].content, /OFFICIAL SHARE STATE: UNKNOWN/);
+    assert.match(rt.completions[0].content, /NOT CONFIRMED/);
+  });
+}
+
+test('normal Daily: actual main entry respects existing daily share attempt with task still false', async () => {
+  const store = priorSession(true);store.set(SH, JSON.stringify({ day: TEST_DAY, code: -403, confirmed: false }));
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => TEST_NOW, respond: (q, method) => {
+    assert.equal(method, 'get', 'no duplicate share or other task write');
+    if (q.url.endsWith('/nav')) return { code: 0, data: { isLogin: true, mid: 42, money: 0, vipStatus: 0 } };
+    if (q.url.endsWith('/exp/reward')) return state(false);
+    if (q.url.endsWith('/coin/today/exp')) return { code: 0, data: 50 };
+    return { code: 0, data: { items: [], list: [] } };
+  } });
+  await rt.start();
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+  assert.match(rt.completions[0].content, /分享❌/);
 });

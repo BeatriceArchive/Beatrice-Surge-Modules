@@ -10,30 +10,44 @@
 
 旧版在申请二维码前删除旧 Cookie，后续失败无法恢复。现在仅在新会话具备 SESSDATA、bili_jct、DedeUserID、buvid3，且 nav 的登录状态和 UID 均验证成功后，单次写入 `betty.bilibili.cookie.session` 提交完整 Cookie/metadata 对。更新后的 Daily 优先读取此记录；没有该记录时兼容旧键。提交后刷新兼容镜像，镜像失败不损坏新记录。正常扫码失败不改旧会话；显式 Shortcuts 参数 `reset` 才执行销毁。Cookie 模块时间上限调整为 240 秒，以容纳扫码后新增的受控跳转，锁 TTL 为 270 秒。
 
-## 分享请求证据与限度
+## 分享专项：1.10.0 的依据与边界
 
-手机已确认：观看可完成、nav 可验证，但分享返回 `-403`，每日状态仍是 false。这证明分享操作被拒绝，不能证明 SESSDATA 失效，也不能仅据此定位具体的设备、账号或请求字段风控条件。
+手机已确认 Cookie 1.5.0 恢复正常；观看、主站会话和 nav 均正常，四个必需 Cookie 字段齐全，而 Daily 1.9.0 的 `bvid + csrf` 分享仍返回 `-403`、官方 `share=false`。因此最小参数只符合基础接口约定，不足以证明适合每日经验任务。具体风控触发条件尚未确认，本轮不改 Cookie 登录流程。
 
-| 项目 | 证据与处理 |
-| --- | --- |
-| Endpoint、POST、form encoding | 近期维护实现仍使用 `/x/web-interface/share/add`；保留 |
-| aid / bvid | API 收集文档列为二选一；本实现选择已有的 bvid，非认定 aid 已失效 |
-| csrf | 使用当前 Cookie 的 bili_jct；最小表单为 bvid + csrf |
-| SESSDATA / buvid3 | 保留完整的官方扫码与主站设备会话，不伪造设备值 |
-| eab_x / ramval / source / ga | 不同实现取值冲突，没有证据证明旧组合必需；从最小基线移除 |
-| Origin / Referer / UA | 官方主站 Origin、对应视频 Referer；保留与 Cookie 获取一致的 UA |
-| Sec-Fetch / WBI / 指纹 | 未证实此 endpoint 需要；不添加猜测字段或伪造浏览器指纹 |
+2026-09-11 重新读取远端源码与提交记录：
 
-对照来源：
+- **BLTH** 当前 mainline 为 `409aa6039c420db9f46f8df732d123d0c08f1ef2`。[分享请求](https://github.com/andywang425/BLTH/blob/409aa6039c420db9f46f8df732d123d0c08f1ef2/src/library/bili-api/index.ts)使用固定 PC-client 来源，注释直接说明 Web 来源与任务完成的差异。该文件 2026-08 仍有维护，2026-06 的提交修复过主站分享任务的候选空数组处理；这些更新证明维护活动，不等于特定账号的成功证据。[上游任务判断](https://github.com/andywang425/BLTH/blob/409aa6039c420db9f46f8df732d123d0c08f1ef2/src/modules/dailyTasks/mainSiteTasks/shareTask.ts)仍依赖 code 0/71000，故本仓只参考请求形态，独立保留官方状态确认。
+- **BiliBiliToolPro 4.0.1** 当前 main 为 `c599b2c0da964e16ea8c454397aa07bb16212628`。[模型](https://github.com/RayWangQvQ/BiliBiliToolPro/blob/c599b2c0da964e16ea8c454397aa07bb16212628/src/Ray.BiliBiliTool.Agent/BiliBiliAgent/Dtos/ApiApi/Video/ShareVideoRequest.cs)仍用 aid/csrf、eab_x=1、ramval=3..19、source=web_normal、ga=1；[接口声明](https://github.com/RayWangQvQ/BiliBiliToolPro/blob/c599b2c0da964e16ea8c454397aa07bb16212628/src/Ray.BiliBiliTool.Agent/BiliBiliAgent/Interfaces/IApiApi.cs)要求主站 Origin，并提示缺少 buvid3 可导致 -403。模型最近一次路径提交是 2026-05 DTO 整理，不能误称为最近修复分享风控。
+- **[BiliBiliToolPro issue #796](https://github.com/RayWangQvQ/BiliBiliToolPro/issues/796)**：2024-11 的真实请求采用 web_normal，收到 HTTP 200、API -403；用户反馈 App 内分享及经验正常。讨论延续至 2025-05，没有可泛化的参数修复证明。这是相同症状的历史证据，不是当前所有账号失败的结论。
+- **PiliPlus** 当前树 `b8eeeb78c441ff5aef4471d2c2c37643f72252d1` 的[接口备注](https://github.com/bggRGjQaUbCoE/PiliPlus/blob/b8eeeb78c441ff5aef4471d2c2c37643f72252d1/lib/http/api.dart)列出 aid/bvid 二选一及 csrf。此处是基础接口备注，不能当作每日 EXP 实际成功证据。[API 收集文档](https://github.com/pskdje/bilibili-API-collect/blob/1d4c2d9e63de341aeb5cb7ee0622e9f7c8568c96/docs/video/action.md)也区分基础参数和可选附加字段。
+- 上轮参考的 BiliOutils 当前 main 仍停留在 2022-12，其 aid+csrf 实现不作为本轮近期任务成功的主要证据。
 
-- [API 收集文档的分享接口](https://github.com/pskdje/bilibili-API-collect/blob/1d4c2d9e63de341aeb5cb7ee0622e9f7c8568c96/docs/video/action.md)：列出 bvid/aid、csrf 和非必要附加字段。文件最近修改于 2025-04，不能作为 2026 实机成功证明。
-- [BiliOutils 请求实现](https://github.com/onlyLTY/BiliOutils/blob/171ca05534c380f70f39902bb973b13101557845/src/net/video.request.ts)：采用 aid + csrf 最小形式。
-- [BLTH 请求实现](https://github.com/andywang425/BLTH/blob/409aa6039c420db9f46f8df732d123d0c08f1ef2/src/library/bili-api/index.ts)：近期维护版本使用另一套附加字段，并称 PC 来源有助任务记账。但其分享任务仍凭 code 0/71000 判断完成，因此没有照搬这套参数作为已证实解决方案。
+据此选择 **一套固定的 BLTH 风格请求**，不轮换候选参数或 UA。相较 1.9.0，它有明确针对每日任务来源归因的维护者证据；不是因为附加参数多就认为更有效。
 
-直接读取当前 Bilibili 公共视频页被 HTTP 412 阻止，未取得当前登录浏览器的实际请求。因此不能声称已证明 `-403` 的唯一服务端根因，也不能声称修改后已实机完成分享。
+| 字段 / 上下文 | 分类 | 最终处理 |
+| --- | --- | --- |
+| POST `/x/web-interface/share/add` | EVIDENCE-SUPPORTED | 多个当前实现一致；继续使用 |
+| aid | REQUIRED（视频标识二选一） | 使用官方视频资料中的 aid；不认定 bvid 无效 |
+| csrf | REQUIRED（本实现认证约束） | 使用当前 bili_jct；不同收集文档对服务端是否强制有分歧，不省略 |
+| source | EVIDENCE-SUPPORTED（每日任务） | 固定 pc_client_normal；不循环尝试来源 |
+| eab_x=2 / ramval=0 / ga=1 | EVIDENCE-SUPPORTED；各字段独立必要性 UNKNOWN | 保留同一维护实现的完整固定组合；文档仍列为可选，不能声称每项都强制 |
+| Origin | EVIDENCE-SUPPORTED | https://www.bilibili.com |
+| Referer | EVIDENCE-SUPPORTED | 当前视频页 https://www.bilibili.com/video/BV…/ |
+| SESSDATA / bili_jct / DedeUserID / buvid3 | REQUIRED（本地安全边界） | 完整保留已验证会话；buvid3 有上游 -403 关联证据，不是保证通过的充分条件 |
+| User-Agent | 保持会话一致；服务端具体影响 UNKNOWN | 继续使用现有 Cookie/Daily 的 iPhone Safari UA；不伪装新设备 |
+| Sec-Fetch / Client Hints / WBI / 复杂设备指纹 | 此 endpoint 必要性 UNKNOWN | 不添加 |
+| 随机 ramval / web_normal | 其他实现或旧版选择 | 本轮不用，也不作为失败后的第二次请求 |
+
+未取得当前账号登录浏览器的实际请求记录；上轮公共页面 GET 遇到 412，本轮没有再次试图绕过，也没有发送真实账号写请求。源码只能支持候选选择，最终必须由手机端的官方 `share=true` 证明任务完成。如果此固定组合仍 -403，会进一步支持账号、设备/会话或反自动化上下文限制的判断；具体服务端原因仍未知。
 
 ## 写入和恢复约束
 
-保留同账号、同北京时间自然日最多一次 POST。先查任务，先持久化尝试记录，再写入；更新参数不清除旧版当天记录。超时、HTTP 错误和 -403 均不重复写入；仅 `share === true` 确认任务完成。请求 code 0 后最多三次状态读取，等待 0、1.2、2.5 秒。
+正式 Daily 保留同账号、同北京时间自然日最多一次 POST，旧 `share_attempt` 按 day 兼容，不因请求升级清零。先查任务，先保存记录，再写入。损坏记录占用当天名额后次日恢复；超时、HTTP 错误与 -403 不重试。
 
-旧记录按 day 兼容。无效记录在本地修复并保守占用当天名额，次日恢复正常，避免无限期阻塞；记录无法保存则不写入。没有发起真实分享 POST。下一次正常 Daily 执行才进行真实验证，观察服务端响应码与最终 share 状态。
+临时测试是独立 `Betty-Bilibili-Share-Test.js` 和可单独安装/删除的模块，不加载或执行 Daily 缓存，代码中没有观看、投币、VIP 操作。按照 [Surge generic](https://manual.nssurge.com/scripting/generic.html) 与 [Panel](https://manual.nssurge.com/tools/panel.html) 官方上下文，只允许 `generic` + 专用脚本名 + 专用 panelName + `$trigger=button`。cron、普通 Daily、自动刷新、编辑器、HTTP API、快捷指令均不能触发测试。
+
+测试先验证四字段及 nav UID，读取官方状态，选择一个有效视频；使用独立 `share_test.<uid>.<date>` 在发送前保留名额，与 Daily 共用锁，不修改正式 SHARE_KEY、Cookie 或 Daily 面板。每账号每北京时间日最多一次额外 POST。记录损坏、进程中断或结果保存失败都不能重新开放当天测试；次日使用新的日期键。测试不引入任务调度。
+
+POST 后无论返回 code 0、-403 或网络失败，立即开始最多三次官方任务读取（0、1.2、2.5 秒），不再执行任何 POST。跨日确认不能将次日状态算作本次成功。通知和面板显示请求 code/message、HTTP 状态、官方 share 以及 CONFIRMED / NOT CONFIRMED；仅 share=true 能确认任务。再次点击保留原响应证据，只重新读取状态。
+
+诊断不记录或输出 Cookie 值；若响应意外回显会话字段，先脱敏。手机安装与点击步骤见 README 的“分享单次测试”。CI 与 mock 行为测试不构成真实账号已成功证明。

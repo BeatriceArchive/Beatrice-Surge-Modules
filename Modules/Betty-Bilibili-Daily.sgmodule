@@ -2,7 +2,7 @@
 #!desc=每天 08:00 自动执行，也可通过 Surge Panel 手动运行 B 站每日等级经验任务。大会员在观看任务完成后额外领取每日 +10 等级经验；投币逐枚补足至最多 5 枚。分享每天最多一次写入，仅官方每日任务状态确认后显示完成。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.9.0
+# Version: 1.10.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 # Copyright (c) 2026 BeatriceArchive

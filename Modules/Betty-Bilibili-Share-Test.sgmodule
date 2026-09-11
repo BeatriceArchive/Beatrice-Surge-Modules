@@ -1,0 +1,13 @@
+#!name=贝蒂的 B 站分享单次测试
+#!desc=临时手动验收入口：仅点击本面板的刷新按钮才测试分享。每个账号每个北京时间自然日最多额外一次 POST；不执行观看、投币或 VIP，不清除正式 Daily 的分享保护。完成验收后可删除本模块。
+#!author=BeatriceArchive
+#!category=Beatrice
+# Version: 1.0.0
+# Project: Betty-Bilibili-Share-Test
+# Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
+
+[Panel]
+Betty-Bilibili-Share-Test = title="贝蒂的 B 站分享单次测试",content="点击右侧刷新：仅分享一次｜不会观看或投币",icon=paperplane,icon-color="#FF9F0A",script-name=Betty-Bilibili-Share-Test
+
+[Script]
+Betty-Bilibili-Share-Test = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Share-Test.js,timeout=90,script-update-interval=60
