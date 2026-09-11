@@ -38,16 +38,10 @@
 | Sec-Fetch / Client Hints / WBI / 复杂设备指纹 | 此 endpoint 必要性 UNKNOWN | 不添加 |
 | 随机 ramval / web_normal | 其他实现或旧版选择 | 本轮不用，也不作为失败后的第二次请求 |
 
-未取得当前账号登录浏览器的实际请求记录；上轮公共页面 GET 遇到 412，本轮没有再次试图绕过，也没有发送真实账号写请求。源码只能支持候选选择，最终必须由手机端的官方 `share=true` 证明任务完成。如果此固定组合仍 -403，会进一步支持账号、设备/会话或反自动化上下文限制的判断；具体服务端原因仍未知。
+实机验收已完成：2026-09-11 用户在 iPhone + Surge 上报告 `REQUEST CODE=0`、HTTP 200、`OFFICIAL SHARE STATE=true`、`RESULT=CONFIRMED`。验收入口与正式 Daily 的表单、Origin、Referer、UA 和 Cookie 请求上下文已通过行为测试核对一致。Daily 1.10.0 的 PC-client 请求实现保持不变。这是当前账号与设备的官方任务完成证据；不能据此确定旧 -403 的唯一触发条件，也不能证明每个附加字段单独不可缺少。
 
 ## 写入和恢复约束
 
 正式 Daily 保留同账号、同北京时间自然日最多一次 POST，旧 `share_attempt` 按 day 兼容，不因请求升级清零。先查任务，先保存记录，再写入。损坏记录占用当天名额后次日恢复；超时、HTTP 错误与 -403 不重试。
 
-临时测试是独立 `Betty-Bilibili-Share-Test.js` 和可单独安装/删除的模块，不加载或执行 Daily 缓存，代码中没有观看、投币、VIP 操作。按照 [Surge generic](https://manual.nssurge.com/scripting/generic.html) 与 [Panel](https://manual.nssurge.com/tools/panel.html) 官方上下文，只允许 `generic` + 专用脚本名 + 专用 panelName + `$trigger=button`。cron、普通 Daily、自动刷新、编辑器、HTTP API、快捷指令均不能触发测试。
-
-测试先验证四字段及 nav UID，读取官方状态，选择一个有效视频；使用独立 `share_test.<uid>.<date>` 在发送前保留名额，与 Daily 共用锁，不修改正式 SHARE_KEY、Cookie 或 Daily 面板。每账号每北京时间日最多一次额外 POST。记录损坏、进程中断或结果保存失败都不能重新开放当天测试；次日使用新的日期键。测试不引入任务调度。
-
-POST 后无论返回 code 0、-403 或网络失败，立即开始最多三次官方任务读取（0、1.2、2.5 秒），不再执行任何 POST。跨日确认不能将次日状态算作本次成功。通知和面板显示请求 code/message、HTTP 状态、官方 share 以及 CONFIRMED / NOT CONFIRMED；仅 share=true 能确认任务。再次点击保留原响应证据，只重新读取状态。
-
-诊断不记录或输出 Cookie 值；若响应意外回显会话字段，先脱敏。手机安装与点击步骤见 README 的“分享单次测试”。CI 与 mock 行为测试不构成真实账号已成功证明。
+实机验收完成后，临时手动测试入口及其专属测试已移除，不再提供每日额外写入路径。保留正式 Daily 行为测试，覆盖固定 PC-client 表单、请求上下文、code 0 未记账、官方状态确认、-403、同日去重、次日恢复、损坏记录和网络失败。删除临时入口不修改 Cookie、正式分享尝试记录或其他任务逻辑。
