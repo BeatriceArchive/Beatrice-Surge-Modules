@@ -22,9 +22,13 @@
 - [贝蒂的哔哩哔哩每日签到](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Daily.sgmodule)
 - [贝蒂的哔哩哔哩 Cookie 获取](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Cookie.sgmodule)
 
-## 贝蒂的 Surge 托管设置
+## 模块说明
 
-`Beatrice-Surge-System.sgmodule` 只覆盖 `[General]`，用于固定当前设备的网络行为：
+### Beatrice-Surge-System.sgmodule
+
+**贝蒂的 Surge 托管设置**
+
+只覆盖 `[General]`，用于固定当前设备的网络行为：
 
 - `use-local-host-item-for-proxy = false`
 - `compatibility-mode = 3`
@@ -43,9 +47,11 @@
 
 它不添加 MITM、Rewrite、Script、Panel 或策略组。
 
-## 贝蒂的基础面板
+### Betty-Basic-Panel.sgmodule
 
-`Betty-Basic-Panel.sgmodule` 保持**单一 Panel**，默认：
+**贝蒂的基础面板**
+
+保持**单一 Panel**，默认：
 
 ```text
 YS=1&RISK=1
@@ -70,13 +76,13 @@ YS=1&RISK=1
 - 不发送 Cookie / Authorization / 节点配置给第三方信息源。
 - 不使用 MITM、Rewrite 或远程脚本加载。
 
-完整数据源、请求预算、测速边界与真机验收说明见：
+完整数据源、请求预算、测速边界与真机验收说明见 [`docs/basic-panel.md`](docs/basic-panel.md)。
 
-- [`docs/basic-panel.md`](docs/basic-panel.md)
+### Betty-Bilibili-Daily.sgmodule
 
-## Bilibili Daily
+**贝蒂的哔哩哔哩每日签到**
 
-`Betty-Bilibili-Daily.sgmodule` 每天 **08:00** 自动运行，也可以通过 Surge Panel 手动执行。
+每天 **08:00** 自动运行，也可以通过 Surge Panel 手动执行。
 
 当前稳定行为：
 
@@ -90,11 +96,11 @@ YS=1&RISK=1
 
 Daily 不监听 Cookie，也不需要 MITM。
 
-## Bilibili Cookie
+### Betty-Bilibili-Cookie.sgmodule
 
-`Betty-Bilibili-Cookie.sgmodule` 是独立的**手动登录工具**。
+**贝蒂的哔哩哔哩 Cookie 获取**
 
-点击 Panel 刷新后：
+这是独立的**手动登录工具**。点击 Panel 刷新后：
 
 1. 创建或继续 Bilibili 官方 Web 二维码登录事务。
 2. 用户在 Bilibili App 中扫码确认。
@@ -106,11 +112,7 @@ Daily 不监听 Cookie，也不需要 MITM。
 
 Cookie 只保存在 Surge 本地持久化存储；不写入仓库、不发送给第三方服务。QR、主站补全和验证都按 Surge 当前规则出站，不强制 DIRECT，也不使用 MITM、CA 或 HTTPS 解密。
 
-Bilibili 会话恢复、分享 `-403` 调查、PC-client 请求依据与真实设备验收记录保留在：
-
-- [`docs/bilibili-session-share.md`](docs/bilibili-session-share.md)
-
-该专项文档是**证据记录**，不是要求每次维护都重跑的操作手册。
+Bilibili 会话恢复、分享 `-403` 调查、PC-client 请求依据与真实设备验收记录保留在 [`docs/bilibili-session-share.md`](docs/bilibili-session-share.md)。该专项文档是**证据记录**，不是要求每次维护都重跑的操作手册。
 
 ## Panel 行为
 
