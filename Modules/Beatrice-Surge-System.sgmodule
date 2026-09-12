@@ -22,6 +22,7 @@ ipv6-vif = disabled
 wifi-assist = false
 all-hybrid = false
 udp-priority = true
+udp-policy-not-supported-behaviour = reject
 
 # ===== Wi-Fi / 热点代理共享 =====
 allow-wifi-access = false
