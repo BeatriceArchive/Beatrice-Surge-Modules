@@ -119,6 +119,10 @@ Surge 当前官方 Panel 语法没有跨模块全局排序字段，因此 Bilibi
 
 https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Daily.sgmodule
 
+### Betty-Bilibili-Cookie.sgmodule
+
+贝蒂的哔哩哔哩 Cookie 获取 1.5.0；仅手动刷新创建或继续官方二维码登录事务，自动刷新只读取本地状态。
+
 Cookie 获取模块安装地址：
 
 https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Cookie.sgmodule
