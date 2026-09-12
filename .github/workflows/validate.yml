@@ -19,6 +19,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout public Surge Config contract
+        uses: actions/checkout@v4
+        with:
+          repository: BeatriceArchive/Beatrice-Surge-Config
+          ref: main
+          path: Beatrice-Surge-Config
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -26,6 +33,8 @@ jobs:
 
       - name: Validate module metadata and script references
         run: node scripts/validate-modules.mjs
+      - name: Validate public Config and Modules contract
+        run: node Beatrice-Surge-Config/scripts/validate-public-contract.mjs Beatrice-Surge-Config/Beatrice-Surge.conf Modules/Beatrice-Surge-System.sgmodule
       - name: Run isolated behavior tests
         run: node --test tests/*.test.mjs
       - name: Check script syntax
