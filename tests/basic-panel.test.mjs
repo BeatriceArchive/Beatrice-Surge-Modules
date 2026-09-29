@@ -795,7 +795,11 @@ for (const [speedMbps, latency] of MATRIX) test('aggregate matrix: ' + speedMbps
   assert.equal(rt.stats.peakSpeed, 3, 'final batch actually executes');
   assert.ok(result.mbps <= speedMbps * 1.001, 'no RTT subtraction or byte inflation');
   assert.ok(result.mbps >= speedMbps * (latency >= 500 ? 0.50 : 0.68), JSON.stringify(result));
-  if (speedMbps >= 300 && latency <= 300) assert.ok(result.mbps >= speedMbps * 0.75);
+  if (speedMbps >= 300 && latency <= 300) {
+    // At 500 Mbps / 300ms even 48 MiB needs ~805ms transfer + 300ms RTT:
+    // ~364 Mbps is honest, not a reason to subtract RTT or raise the byte budget.
+    assert.ok(result.mbps >= speedMbps * (speedMbps === 500 && latency === 300 ? 0.70 : 0.75));
+  }
   assert.ok(result.elapsed >= 700); assert.equal(result.streams, 3);
   assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakTimers <= 1);
   assert.ok(rt.calls.length <= 9, 'two probes and at most two fixed batches after warmup');
@@ -910,8 +914,9 @@ test('sampler: end-to-end delayed complete callbacks still yield an estimate', a
   const rt = runtime({ trigger: 'button', speedReply: (q, bytes) =>
     reply({ byteLength: bytes }, 200, {}, bytes <= 32 * 1024 ? 10 : 1800) });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '多流采样');
-  assert.equal(result.mbps, 1.5 * MiB * 8 / 1800 / 1000); assert.equal(result.elapsed, 1800);
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
+  assert.equal(result.mbps, 0.5 * MiB * 8 / 1800 / 1000); assert.equal(result.elapsed, 1800);
+  assert.equal(rt.calls.length, 2, 'predicted batch exceeds native timeout; retain the complete probe');
   assert.ok(rt.now() - NOW <= 8000);
 });
 
