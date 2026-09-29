@@ -35,7 +35,7 @@ function defaultReply(q) {
 function runtime({ respond = defaultReply, trigger = 'auto-interval', argument = '', store = new Map(),
   network = { wifi: { ssid: 'Test Wi-Fi' }, v4: { primaryAddress: '192.168.1.8' }, dns: ['1.1.1.1'] },
   apiReply = () => ({ profile: '[General]\nipv6=false\nipv6-vif=disabled' }),
-  speedMbps = 100, latency = 20, callbackDelay = 0, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false, speedReply = () => undefined } = {}) {
+  speedMbps = 100, streamMbps = Infinity, latency = 20, callbackDelay = 0, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false, speedReply = () => undefined } = {}) {
   let clock = clockStart, sequence = 0, wireFree = clock, active = 0, activeSpeed = 0;
   const events = [], calls = [], apiCalls = [], writes = [], logs = [], done = [];
   const stats = { peak: 0, peakSpeed: 0, peakTimers: 0 };
@@ -61,7 +61,7 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
       else if (size > bodyLimit) r = { error: 'Response body exceeds size limit', delay: latency };
       else {
         wireFree = Math.max(clock + latency, wireFree) + size * 8 / speedMbps / 1000;
-        r = { body: { byteLength: size }, status: 200, delay: wireFree - clock + callbackDelay };
+        r = { body: { byteLength: size }, status: 200, delay: Math.max(wireFree - clock, latency + size * 8 / streamMbps / 1000) + callbackDelay };
       }
     } else r = respond(q);
     if (r === 'hang') return;
@@ -966,4 +966,18 @@ test('sampler: a short earlier block never causes retries after an explicit HTTP
   const result = await rt.run("runDownloadSpeedTest('')");
   assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, 403);
   assert.equal(rt.calls.length, 3);
+});
+
+test('throughput regression: a per-stream ceiling must lead to a real fixed multi-stream measurement', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 300, streamMbps: 20, latency: 100 });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(result.mode, '多流采样');
+  assert.ok(rt.stats.peakSpeed >= 3, 'final stage must actually issue concurrent requests');
+  assert.ok(result.mbps > 40 && result.mbps <= 60, 'finite three-stream throughput, not a fabricated 300 Mbps');
+});
+test('throughput regression: a single-stream result must not use the node-throughput bar', async () => {
+  const rt = runtime();
+  const lines = await rt.run("(()=>{const lines=[];appendSpeedLines(lines,{state:'fresh',mode:'单流估算',mbps:23.2});return lines.join('\\n');})()");
+  assert.match(lines, /单流估算/);
+  assert.doesNotMatch(lines, /[●○]/);
 });
