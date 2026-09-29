@@ -35,7 +35,7 @@ function defaultReply(q) {
 function runtime({ respond = defaultReply, trigger = 'auto-interval', argument = '', store = new Map(),
   network = { wifi: { ssid: 'Test Wi-Fi' }, v4: { primaryAddress: '192.168.1.8' }, dns: ['1.1.1.1'] },
   apiReply = () => ({ profile: '[General]\nipv6=false\nipv6-vif=disabled' }),
-  speedMbps = 100, latency = 20, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false } = {}) {
+  speedMbps = 100, latency = 20, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false, speedReply = () => undefined } = {}) {
   let clock = clockStart, sequence = 0, wireFree = clock, active = 0, activeSpeed = 0;
   const events = [], calls = [], apiCalls = [], writes = [], logs = [], done = [];
   const stats = { peak: 0, peakSpeed: 0, peakTimers: 0 };
@@ -54,8 +54,10 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
     let r;
     if (speed) {
       const size = Number(u.searchParams.get('bytes'));
-      if (failSpeed === 'hang') return;
-      if (failSpeed) r = { error: 'fixture failure', delay: 10 };
+      r = speedReply(q, size);
+      if (r !== undefined) { /* targeted transport fixtures */ }
+      else if (failSpeed === 'hang') return;
+      else if (failSpeed) r = { error: 'fixture failure', delay: 10 };
       else if (size > bodyLimit) r = { error: 'Response body exceeds size limit', delay: latency };
       else {
         wireFree = Math.max(clock + latency, wireFree) + size * 8 / speedMbps / 1000;
@@ -645,4 +647,19 @@ test('cache: reading a risk hit does not extend its original expiry', async () =
   assert.equal(warm.calls.length, 1); assert.equal(JSON.parse(store.get(INTEL)).entries.risk.time, time);
   const stale = runtime({ store, clockStart: time + 3600000 }); await stale.run("getNetworkIntelligence('')");
   assert.equal(stale.calls.length, 2);
+});
+
+for (const failure of ['http', 'timeout', 'missing callback']) test(`speed regression: valid pilot survives optional refinement ${failure}`, async () => {
+  let refining = false;
+  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) => {
+    if (bytes >= 4 * 1024 * 1024) refining = true;
+    if (!refining) return undefined;
+    if (failure === 'missing callback') return 'hang';
+    return failure === 'http' ? reply({ byteLength: 0 }, 503) : { error: 'request timed out', delay: 100 };
+  } });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.ok(refining, 'fixture reaches optional refinement after a valid pilot');
+  assert.ok(result && result.mbps > 0, 'optional failure must preserve valid pilot');
+  assert.ok(rt.now() - NOW <= 8000);
+  assert.ok(rt.stats.peakSpeed <= 4);
 });
