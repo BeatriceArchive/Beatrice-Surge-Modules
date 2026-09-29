@@ -1,5 +1,5 @@
 #!name=贝蒂的基础面板
-#!desc=1.5.2：顺序放大下载样本、最多双请求确认；完整测量即时保留，历史结果独立标注；Net.Coffee 单源 IP 情报；自动刷新不测速，手动最多 8 秒 / 64 MiB。
+#!desc=1.5.3：固定三路下载吞吐估算；多流与单流回退明确区分，历史结果独立标注；Net.Coffee 单源 IP 情报；自动刷新不测速，手动最多 8 秒 / 64 MiB。
 #!category=🩺 网络工具
 #!system=ios
 # Copyright (c) 2026 BeatriceArchive

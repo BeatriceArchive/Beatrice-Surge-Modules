@@ -35,7 +35,7 @@ function defaultReply(q) {
 function runtime({ respond = defaultReply, trigger = 'auto-interval', argument = '', store = new Map(),
   network = { wifi: { ssid: 'Test Wi-Fi' }, v4: { primaryAddress: '192.168.1.8' }, dns: ['1.1.1.1'] },
   apiReply = () => ({ profile: '[General]\nipv6=false\nipv6-vif=disabled' }),
-  speedMbps = 100, latency = 20, callbackDelay = 0, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false, speedReply = () => undefined } = {}) {
+  speedMbps = 100, streamMbps = Infinity, latency = 20, callbackDelay = 0, bodyLimit = Infinity, failSpeed = false, clockStart = NOW, failStore = false, speedReply = () => undefined } = {}) {
   let clock = clockStart, sequence = 0, wireFree = clock, active = 0, activeSpeed = 0;
   const events = [], calls = [], apiCalls = [], writes = [], logs = [], done = [];
   const stats = { peak: 0, peakSpeed: 0, peakTimers: 0 };
@@ -61,7 +61,7 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
       else if (size > bodyLimit) r = { error: 'Response body exceeds size limit', delay: latency };
       else {
         wireFree = Math.max(clock + latency, wireFree) + size * 8 / speedMbps / 1000;
-        r = { body: { byteLength: size }, status: 200, delay: wireFree - clock + callbackDelay };
+        r = { body: { byteLength: size }, status: 200, delay: Math.max(wireFree - clock, latency + size * 8 / streamMbps / 1000) + callbackDelay };
       }
     } else r = respond(q);
     if (r === 'hang') return;
@@ -271,12 +271,12 @@ for (const trigger of ['auto-interval', 'editor', 'http-api', 'intent', '', unde
   const rt = runtime({ trigger }); await rt.run("getSpeedForThisRun('', '8.8.4.4')"); assert.equal(rt.calls.length, 0);
 });
 
-for (const [speedMbps, mode] of [[25, '顺序采样'], [200, '双样本采样'], [500, '双样本采样']]) test(`speed: adaptive ${speedMbps} Mbps path is bounded and never exceeds link capacity`, async () => {
+for (const [speedMbps, mode] of [[25, '多流采样'], [200, '多流采样'], [500, '多流采样']]) test(`speed: adaptive ${speedMbps} Mbps path is bounded and never exceeds link capacity`, async () => {
   const rt = runtime({ trigger: 'button', speedMbps });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
   assert.ok(result && result.mbps > 0, JSON.stringify(result)); assert.equal(result.mode, mode);
   assert.ok(result.mbps <= speedMbps * 1.001); assert.ok(result.mbps > speedMbps * 0.5, 'avoid gross underestimate on controlled link');
-  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 2);
+  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 3);
   const downloads = rt.calls.filter(q => q.url.includes('/__down'));
   const total = downloads.reduce((n, q) => n + Number(new URL(q.url).searchParams.get('bytes')), 0);
   assert.ok(total <= 64 * 1024 * 1024); assert.ok(downloads.length <= 16);
@@ -287,7 +287,7 @@ for (const [speedMbps, mode] of [[25, '顺序采样'], [200, '双样本采样'],
 test('speed: legacy small body limits use bounded safe fallback and label its limitation', async () => {
   const rt = runtime({ trigger: 'button', speedMbps: 20, bodyLimit: 64 * 1024 });
   const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(value.mode, '小响应降级'); assert.ok(rt.stats.peakSpeed <= 2);
+  assert.equal(value.mode, '小响应降级'); assert.ok(rt.stats.peakSpeed <= 3);
 });
 
 test('speed: network failure and hung callback preserve last success and its timestamp', async () => {
@@ -373,19 +373,19 @@ test('profile: malformed numeric suffixes and contradictory duplicate fields are
   }
 });
 
-for (const [speedMbps, latency] of [[100, 5], [300, 80], [500, 150], [800, 50]]) test(`speed: ${speedMbps} Mbps / ${latency}ms RTT never exceeds two concurrent speed requests`, async () => {
+for (const [speedMbps, latency] of [[100, 5], [300, 80], [500, 150], [800, 50]]) test(`speed: ${speedMbps} Mbps / ${latency}ms RTT never exceeds three concurrent speed requests`, async () => {
   const rt = runtime({ trigger: 'button', speedMbps, latency });
   const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
   assert.ok(value && value.mbps > 0); assert.ok(value.mbps <= speedMbps * 1.001);
   assert.ok(value.mbps >= speedMbps * 0.5, 'controlled network should avoid >50% underestimation');
-  assert.ok(rt.stats.peakSpeed <= 2); assert.ok(rt.now() - NOW <= 8000);
+  assert.ok(rt.stats.peakSpeed <= 3); assert.ok(rt.now() - NOW <= 8000);
   assert.ok(rt.calls.reduce((n, q) => n + Number(new URL(q.url).searchParams.get('bytes')), 0) <= 64 * 1024 * 1024);
 });
 
 test('main: button performs bounded adaptive test, explicit policy stays out of diagnostics', async () => {
   const policy = 'fixture-private-policy';
   const rt = runtime({ trigger: 'button', speedMbps: 500, argument: 'YS=1&RISK=1&POLICY=' + policy });
-  await rt.run('main()'); assert.equal(rt.done.length, 1); assert.ok(rt.stats.peakSpeed <= 2);
+  await rt.run('main()'); assert.equal(rt.done.length, 1); assert.ok(rt.stats.peakSpeed <= 3);
   assert.match(rt.done[0].content, /测速.*Mbps/); assert.match(rt.done[0].content, /[●○]{10} · 500 Mbps/);
   assert.equal(JSON.stringify([rt.logs, rt.writes, rt.done]).includes(policy), false);
   assert.ok(rt.calls.filter(q => !q.url.includes('gstatic.com')).every(q => q.policy === policy));
@@ -622,11 +622,11 @@ test('public IP: ordinary addresses and neighboring range boundaries stay accept
   }
 });
 
-test('release: module, script, README and technical documentation agree on 1.5.2', () => {
+test('release: module, script, README and technical documentation agree on 1.5.3', () => {
   for (const path of ['../Modules/Betty-Basic-Panel.sgmodule', '../README.md', '../docs/basic-panel.md']) {
-    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /1\.5\.2/);
+    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /1\.5\.3/);
   }
-  assert.match(SOURCE, /Version: 1\.5\.2/);
+  assert.match(SOURCE, /Version: 1\.5\.3/);
   assert.doesNotMatch(SOURCE, /countryVote|consensusGeo|function vote/);
   const intelligence = SOURCE.slice(SOURCE.indexOf('/* ---------- Same-IP'), SOURCE.indexOf('/* ---------- Website'));
   assert.deepEqual([...new Set([...intelligence.matchAll(/https:\/\/([^/"]+)/g)].map(m => m[1]))], ['ip.net.coffee']);
@@ -667,7 +667,7 @@ for (const failure of ['timeout', 'transport', 'body_limit', 'body_mismatch', 'i
     failure === 'body_mismatch' ? reply({ byteLength: 0 }) : reply({ byteLength: bytes }, 200, {}, 1) });
   const result = await rt.run("runDownloadSpeedTest('')");
   assert.equal(result.mbps, undefined); assert.equal(result.failure.reason, failure);
-  assert.ok(rt.calls.length <= 7); assert.equal(rt.store.has(SPEED), false);
+  assert.ok(rt.calls.length <= 9); assert.equal(rt.store.has(SPEED), false);
   assert.doesNotMatch(JSON.stringify([result, rt.logs, rt.writes]), /SECRET|private.invalid/);
 });
 
@@ -677,7 +677,7 @@ for (const failure of ['body_mismatch', 'transport', 'timeout']) test('speed: bo
   const result = await rt.run("runDownloadSpeedTest('')");
   assert.ok(result.mbps > 0); assert.equal(result.mode, '小响应降级');
   assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) > 64 * 1024).length, 1);
-  assert.ok(rt.stats.peakSpeed <= 2);
+  assert.ok(rt.stats.peakSpeed <= 3);
 });
 
 test('speed block: binary views/buffers, exact byte lengths, duplicate callbacks and callback exceptions', async () => {
@@ -731,16 +731,16 @@ test('speed UI: uncached failure is concise; fresh success alone has a bar; cool
   assert.equal(text, '测速失败 · HTTP 403');
   const success = runtime({ trigger: 'button', speedMbps: 500 });
   const first = await success.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
-  assert.match(first, /^测速 \d+\.\d Mbps · \d+\.\d MB\/s\n[●○]{10} · 500 Mbps$/);
+  assert.match(first, /^测速 \d+\.\d Mbps · \d+\.\d MB\/s\n[●○]{10} · 500 Mbps · 多流采样$/);
   const next = await success.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
   assert.match(next, /测速冷却中/); assert.doesNotMatch(next, /[●○]/);
 });
 
-test('speed cache: equivalent IPv6 remains matched and quick samples round-trip without changing timestamp', async () => {
+test('speed cache: equivalent IPv6 remains matched and old quick samples become labelled history', async () => {
   const rt = runtime({ store: new Map([[SPEED, JSON.stringify({ mbps: 12, time: NOW - 60000,
     ip: '2606:4700:4700::1111', mode: '快速采样' })]]) });
   const value = await rt.run("getSpeedForThisRun('', '2606:4700:4700:0:0:0:0:1111')");
-  assert.equal(value.otherExit, false); assert.equal(value.mode, '快速采样'); assert.equal(value.time, NOW - 60000);
+  assert.equal(value.otherExit, false); assert.equal(value.mode, '历史采样'); assert.equal(value.time, NOW - 60000);
 });
 
 test('compact panel: 500 is abnormal, successful GET is quiet, Taiwan uses text, traffic means remaining', async () => {
@@ -781,22 +781,28 @@ test('speed UI: cache from a previous day retains its date', async () => {
   assert.match(await rt.run('speedTimeLabel(Date.now())'), /^\d{2}:\d{2}$/);
 });
 
+
 const MiB = 1024 * 1024;
 const speedBytes = rt => rt.calls.filter(q => q.url.includes('/__down'))
   .reduce((sum, q) => sum + Number(new URL(q.url).searchParams.get('bytes')), 0);
-const MATRIX = [[10,50],[10,150],[10,300],[50,50],[50,150],[50,300],
-  [100,150],[100,300],[300,50],[300,150],[300,300],[500,50],[500,150],[500,300],
-  [100,500],[300,500],[100,900]];
-for (const [speedMbps, latency] of MATRIX) test('sampler matrix: ' + speedMbps + ' Mbps / ' + latency + 'ms', async t => {
+const budgetCode = '{bytes:0,requests:0,closed:false,deadline:Date.now()+8000,best:null}';
+const MATRIX = [20, 50, 100, 200, 300, 500].flatMap(mbps => [50, 100, 150, 300, 500].map(rtt => [mbps, rtt]))
+  .concat([[10, 50], [10, 150], [10, 300], [100, 900]]);
+for (const [speedMbps, latency] of MATRIX) test('aggregate matrix: ' + speedMbps + ' Mbps / ' + latency + 'ms', async t => {
   const rt = runtime({ trigger: 'button', speedMbps, latency });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh', JSON.stringify(result));
-  assert.ok(result.mbps <= speedMbps * 1.001, 'never subtract RTT or inflate byte count');
-  const floor = latency >= 500 ? 0.55 : speedMbps >= 500 && latency >= 300 ? 0.60 : 0.70;
-  assert.ok(result.mbps >= speedMbps * floor, 'avoid gross underestimation: ' + JSON.stringify(result));
-  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 2);
-  assert.ok(rt.stats.peakTimers <= 1, 'only one speed watchdog, independent of sample count');
-  assert.ok(rt.calls.length <= 7, 'normal ramp and confirmation are a fixed bounded sequence');
+  assert.equal(result.state, 'fresh', JSON.stringify(result)); assert.equal(result.mode, '多流采样');
+  assert.equal(rt.stats.peakSpeed, 3, 'final batch actually executes');
+  assert.ok(result.mbps <= speedMbps * 1.001, 'no RTT subtraction or byte inflation');
+  assert.ok(result.mbps >= speedMbps * (latency >= 500 ? 0.50 : 0.68), JSON.stringify(result));
+  if (speedMbps >= 300 && latency <= 300) {
+    // At 500 Mbps / 300ms even 48 MiB needs ~805ms transfer + 300ms RTT:
+    // ~364 Mbps is honest, not a reason to subtract RTT or raise the byte budget.
+    assert.ok(result.mbps >= speedMbps * (speedMbps === 500 && latency === 300 ? 0.70 : 0.75));
+  }
+  assert.ok(result.elapsed >= 700); assert.equal(result.streams, 3);
+  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakTimers <= 1);
+  assert.ok(rt.calls.length <= 9, 'two probes and at most two fixed batches after warmup');
   assert.ok(speedBytes(rt) <= 64 * MiB);
   assert.ok(rt.calls.every(q => !('policy' in q) && q.timeout > 0 && q.timeout <= 4 &&
     q['binary-mode'] === true && !q['auto-cookie'] && !q['auto-redirect']));
@@ -804,39 +810,114 @@ for (const [speedMbps, latency] of MATRIX) test('sampler matrix: ' + speedMbps +
     milliseconds: Math.round(rt.now() - NOW), MiB: +(speedBytes(rt) / MiB).toFixed(3), mode: result.mode }));
 });
 
-test('sampler regression: issued responses completing after 1500ms drain without clipped elapsed', async () => {
-  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, 1800) });
-  const result = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000};return measureDownload('',512*1024,2,b);})()");
-  assert.equal(result.elapsed, 1800);
-  assert.equal(result.mbps, MiB * 8 / 1800 / 1000);
-  assert.equal(rt.calls.length, 2, 'no replacement workers after the fixed batch starts');
-});
-
-test('sampler regression: incomplete peer cannot count as failure or invalidate a complete sample', async () => {
-  let n = 0;
-  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, ++n === 1 ? 200 : 1800) });
-  const value = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000};let first;setTimeout(()=>{first=b.best;},500);const result=await measureDownload('',512*1024,2,b);return {first,result};})()");
-  assert.equal(value.first.mode, '快速采样');
-  assert.equal(value.first.mbps, 512 * 1024 * 8 / 200 / 1000);
-  assert.equal(value.result.elapsed, 1800);
-  assert.equal(value.result.mbps, MiB * 8 / 1800 / 1000, 'both bodies / last completion, never nominal stop');
-});
-
-test('sampler regression: end-to-end delayed complete callbacks yield a fresh estimate', async () => {
-  const rt = runtime({ trigger: 'button', speedReply: (q, bytes) =>
-    reply({ byteLength: bytes }, 200, {}, bytes <= 32 * 1024 ? 10 : 1800) });
+for (const streamMbps of [20, 50, 100]) test('aggregate: per-stream ' + streamMbps + ' Mbps ceiling is not the shared 300 Mbps link', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 300, streamMbps, latency: 100 });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh'); assert.ok(result.mbps > 0);
-  assert.equal(result.elapsed, 3600); assert.equal(result.mbps, MiB * 8 / 3600 / 1000);
-  assert.ok(rt.now() - NOW <= 8000);
+  assert.equal(result.mode, '多流采样'); assert.equal(rt.stats.peakSpeed, 3);
+  assert.ok(result.mbps > streamMbps * 2 && result.mbps <= Math.min(300, streamMbps * 3));
+  assert.ok(speedBytes(rt) <= 64 * MiB && rt.now() - NOW <= 8000);
+});
+
+test('aggregate math: three 4 MiB bodies in 400ms use total bytes, not mean stream speed', async () => {
+  const rt = runtime();
+  const value = await rt.run('summarizeSpeedBatch({started:3,successful:3,bytes:12*1024*1024,elapsed:400,time:Date.now()})');
+  assert.equal(value.mbps, 12 * MiB * 8 / 400 / 1000);
+  assert.equal(value.mbPerSecond, 12 * MiB / 400 / 1000);
+});
+test('aggregate math: three of four complete 8 MiB bodies use the last accepted 900ms completion', async () => {
+  const rt = runtime();
+  const value = await rt.run('summarizeSpeedBatch({started:4,completed:4,successful:3,failed:1,bytes:24*1024*1024,elapsed:900,time:Date.now()})');
+  assert.equal(value.mbps, 24 * MiB * 8 / 900 / 1000);
+  assert.equal(value.streams, 3); assert.equal(value.started, 4);
+});
+test('aggregate math: one of four successes is never a multi-stream result', async () => {
+  assert.equal(await runtime().run('summarizeSpeedBatch({started:4,successful:1,bytes:8388608,elapsed:900})'), null);
+});
+test('aggregate math: 500ms and 800ms completions share one 800ms denominator', async () => {
+  let n = 0;
+  const rt = runtime({ speedReply: (q, bytes) => ++n <= 2
+    ? reply({ byteLength: bytes }, 200, {}, n === 1 ? 500 : 800) : reply('', 503, {}, 1400) });
+  const value = await rt.run('(async()=>{const b=' + budgetCode + ";const state=await measureDownload('',4*1024*1024,b);return {state,result:b.best};})()");
+  assert.equal(value.result.mbps, 8 * MiB * 8 / 800 / 1000);
+  assert.equal(value.result.elapsed, 800); assert.equal(value.result.time, NOW + 800);
+  assert.equal(rt.now(), NOW + 1400, 'late failed peer is drained but contributes neither bytes nor accepted end time');
+  assert.equal(value.state.completed, 3); assert.equal(value.state.failed, 1);
+});
+test('stream-count comparison: a fixed three-stream batch exercises more capacity without requiring a fourth', async () => {
+  const rt = runtime(), rates = [];
+  // Ideal shared 300 Mbps link with a 100 Mbps per-request ceiling. A model,
+  // not evidence that Surge creates independent TCP connections.
+  for (const count of [2, 3, 4]) {
+    const bytes = count * 8 * MiB;
+    const elapsed = 100 + Math.max(bytes * 8 / 300 / 1000, 8 * MiB * 8 / 100 / 1000);
+    const v = await rt.run('summarizeSpeedBatch(' + JSON.stringify({ started: count, successful: count, bytes, elapsed, time: NOW }) + ')');
+    rates.push(v.mbps);
+  }
+  assert.ok(rates[1] / rates[0] > 1.49);
+  assert.ok(rates[2] / rates[1] < 1.05, 'fourth stream has modest benefit in this controlled case');
+});
+
+test('aggregate: callbacks after the old 1500ms window count with their real completion time', async () => {
+  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, 1800) });
+  const value = await rt.run('(async()=>{const b=' + budgetCode + ";const state=await measureDownload('',512*1024,b);return {state,result:b.best};})()");
+  assert.equal(value.result.elapsed, 1800);
+  assert.equal(value.result.mbps, 1.5 * MiB * 8 / 1800 / 1000);
+  assert.equal(value.state.completed, 3); assert.equal(rt.calls.length, 3);
+});
+test('aggregate: in-flight peer is not a failure and a later success updates both bytes and denominator', async () => {
+  let n = 0;
+  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, [200, 800, 1800][n++]) });
+  const value = await rt.run('(async()=>{const b=' + budgetCode + ";let first,mid;setTimeout(()=>{first={...b.batch,result:{...b.best}};},500);setTimeout(()=>{mid={...b.batch,result:{...b.best}};},1000);await measureDownload('',512*1024,b);return {first,mid,result:b.best};})()");
+  assert.equal(value.first.successful, 1); assert.equal(value.first.completed, 1); assert.equal(value.first.failed, 0);
+  assert.equal(value.first.result.mode, '单流估算');
+  assert.equal(value.mid.completed, 2); assert.equal(value.mid.failed, 0); assert.equal(value.mid.result.streams, 2);
+  assert.equal(value.mid.result.mbps, MiB * 8 / 800 / 1000);
+  assert.equal(value.result.streams, 3);
+  assert.equal(value.result.mbps, 1.5 * MiB * 8 / 1800 / 1000, 'do not cherry-pick the earlier higher two-stream rate');
+});
+test('aggregate: two successful peers survive a missing callback at the global deadline', async () => {
+  let n = 0;
+  const rt = runtime({ speedReply: (q, bytes) => ++n <= 2 ? reply({ byteLength: bytes }, 200, {}, n * 400) : 'hang' });
+  const value = await rt.run("(async()=>{let b;adaptiveDownload=async(policy,budget)=>{b=budget;await measureDownload(policy,512*1024,budget);return budget.best;};const result=await runDownloadSpeedTest('');return {result,state:b.batch};})()");
+  assert.equal(value.result.mode, '多流采样'); assert.equal(value.result.streams, 2);
+  assert.equal(value.result.mbps, MiB * 8 / 800 / 1000);
+  assert.equal(value.state.completed, 2); assert.equal(value.state.failed, 0); assert.equal(rt.now() - NOW, 8000);
+  const text = await rt.run('(()=>{const a=[];appendSpeedLines(a,' + JSON.stringify({ ...value.result, state: 'fresh' }) + ");return a.join('\\n');})()");
+  assert.match(text, /多流采样 2\/3/);
+});
+test('aggregate: one complete peer survives missing peers only as a single-stream fallback', async () => {
+  let n = 0;
+  const rt = runtime({ speedReply: (q, bytes) => ++n === 1 ? reply({ byteLength: bytes }, 200, {}, 300) : 'hang' });
+  const result = await rt.run("(async()=>{adaptiveDownload=async(policy,budget)=>{await measureDownload(policy,512*1024,budget);return budget.best;};return runDownloadSpeedTest('');})()");
+  assert.equal(result.mode, '单流估算'); assert.equal(result.mbps, 512 * 1024 * 8 / 300 / 1000);
+  assert.equal(rt.now() - NOW, 8000); assert.equal(rt.calls.length, 3);
+});
+test('aggregate: duplicate callbacks never double-count bytes or create new requests', async () => {
+  const rt = runtime({ speedReply: (q, bytes) => ({ body: { byteLength: bytes }, status: 200, delay: 800, duplicate: true }) });
+  const value = await rt.run('(async()=>{const b=' + budgetCode + ";const state=await measureDownload('',512*1024,b);return {state,result:b.best};})()");
+  assert.equal(value.result.mbps, 1.5 * MiB * 8 / 800 / 1000); assert.equal(value.state.failed, 0);
+  assert.equal(value.state.completed, 3); assert.equal(rt.calls.length, 3);
+});
+test('aggregate: admission refuses an entire batch before starting any request', async () => {
+  const rt = runtime();
+  const value = await rt.run('(async()=>{const b=' + budgetCode + ";b.bytes=63*1024*1024;return measureDownload('',512*1024,b);})()");
+  assert.equal(value.started, 0); assert.equal(rt.calls.length, 0);
 });
 
 for (const callbackDelay of [100, 300, 700]) test('sampler: native callback delay ' + callbackDelay + 'ms is included in elapsed', async () => {
   const rt = runtime({ speedMbps: 300, latency: 150, callbackDelay });
   const result = await rt.run("runDownloadSpeedTest('')");
   assert.ok(result.mbps > 0 && result.mbps < 300);
-  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 2);
-  assert.ok(speedBytes(rt) <= 64 * MiB);
+  assert.ok(rt.now() - NOW <= 8000 && rt.stats.peakSpeed <= 3 && speedBytes(rt) <= 64 * MiB);
+});
+test('sampler: end-to-end delayed complete callbacks still yield an estimate', async () => {
+  const rt = runtime({ trigger: 'button', speedReply: (q, bytes) =>
+    reply({ byteLength: bytes }, 200, {}, bytes <= 32 * 1024 ? 10 : 1800) });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
+  assert.equal(result.mbps, 0.5 * MiB * 8 / 1800 / 1000); assert.equal(result.elapsed, 1800);
+  assert.equal(rt.calls.length, 2, 'predicted batch exceeds native timeout; retain the complete probe');
+  assert.ok(rt.now() - NOW <= 8000);
 });
 
 for (const [reason, failure] of [
@@ -846,45 +927,72 @@ for (const [reason, failure] of [
   ['body_limit', { error: 'Response body exceeds size limit' }],
   ['transport', { error: 'private transport error' }],
   ['deadline', 'hang']
-]) test('sampler: optional confirmation ' + reason + ' preserves the complete ramp result', async () => {
-  let large = 0;
-  const rt = runtime({ trigger: 'button', speedMbps: 500, latency: 150, speedReply: (q, bytes) => {
-    if (bytes === 16 * MiB && ++large >= 2) return failure;
-  } });
+]) test('sampler: final batch ' + reason + ' preserves a complete single-stream probe', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 300, latency: 150, speedReply: (q, bytes) => bytes > 2 * MiB ? failure : undefined });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.ok(large >= 2, 'fixture reached the fixed pair after the 16 MiB ramp response');
-  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '快速采样');
-  assert.ok(Math.abs(result.mbps - 16 * MiB * 8 / (150 + 16 * MiB * 8 / 500 / 1000) / 1000) < 0.001);
-  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 2);
-  assert.equal(rt.calls.length, 7, 'one failed batch cannot trigger shrink/retry loops');
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
+  assert.ok(Math.abs(result.mbps - 2 * MiB * 8 / (150 + 2 * MiB * 8 / 300 / 1000) / 1000) < 0.001);
+  assert.equal(rt.calls.length, 6, 'one fixed failed batch; no shrinking or retry loop');
+  assert.ok(rt.now() - NOW <= 8000 && rt.stats.peakSpeed <= 3);
   assert.equal(JSON.parse(rt.store.get(SPEED)).mbps, result.mbps);
 });
+test('sampler: failed optional enlargement cannot erase a complete single-stream result', async () => {
+  const rt = runtime({ speedReply: (q, bytes) => bytes >= 8 * MiB ? reply('', 500) :
+    reply({ byteLength: bytes }, 200, {}, bytes === 32768 ? 10 : bytes === 512 * 1024 ? 150 : bytes === 2 * MiB ? 600 : 300) });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.equal(result.mode, '单流估算'); assert.ok(result.mbps > 0);
+  assert.equal(rt.calls.length, 9, 'one too-short complete batch then one failed larger batch');
+});
+test('sampler: successful short batch enlarges once and never replenishes workers', async () => {
+  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {},
+    bytes === 32768 ? 10 : bytes === 512 * 1024 ? 150 : bytes === 2 * MiB ? 600 : bytes === 4 * MiB ? 300 : 900) });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.equal(result.mode, '多流采样');
+  assert.equal(rt.calls.length, 9); assert.equal(rt.stats.peakSpeed, 3);
+  assert.equal(result.mbps, 24 * MiB * 8 / 900 / 1000);
+  const counts = new Map();
+  for (const q of rt.calls) counts.set(q.time, (counts.get(q.time) || 0) + 1);
+  assert.deepEqual([...counts.values()], [1, 1, 1, 3, 3]);
+  assert.ok(speedBytes(rt) <= 64 * MiB);
+});
 
-for (const bytes of [512 * 1024, 2 * MiB]) test('sampler: a single qualified ' + bytes + '-byte response is a quick estimate', async () => {
+for (const bytes of [512 * 1024, 2 * MiB]) test('sampler: a qualified ' + bytes + '-byte response is retained with honest single-stream mode', async () => {
+  let sent = 0;
   const rt = runtime({ trigger: 'button', speedReply: (q, size) => {
+    sent++;
     if (size <= 32 * 1024) return reply({ byteLength: size });
     if (size < bytes) return reply({ byteLength: size }, 200, {}, 10);
-    if (size === bytes) return reply({ byteLength: size }, 200, {}, 300);
+    if (size === bytes && sent <= 3) return reply({ byteLength: size }, 200, {}, 300);
     return reply({ byteLength: 0 }, 503);
   } });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '快速采样');
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
   assert.equal(result.mbps, bytes * 8 / 300 / 1000);
-  assert.equal(rt.calls.at(-1).url.includes('speed.cloudflare.com'), true);
 });
-
-test('sampler: extremely short complete requests are not invented into a rate', async () => {
+test('sampler: extremely short complete requests never become a credible aggregate rate', async () => {
   const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, 1) });
   const result = await rt.run("runDownloadSpeedTest('')");
-  assert.equal(result.failure.reason, 'insufficient_samples'); assert.equal(rt.calls.length, 7);
+  assert.equal(result.failure.reason, 'insufficient_samples'); assert.ok(rt.calls.length <= 9);
 });
-
-test('sampler: a complete ramp near the global deadline is retained without another request', async () => {
+test('sampler: a probe near deadline stays single-stream without a late batch', async () => {
   const rt = runtime({ trigger: 'button', speedReply: (q, bytes) =>
     reply({ byteLength: bytes }, 200, {}, bytes <= 32 * 1024 ? 10 : NOW + 7950 - q.time) });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '快速采样');
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
   assert.equal(result.elapsed, 7940); assert.equal(rt.calls.length, 2);
+});
+test('probe sizing: slower, faster and very fast paths choose progressively larger safe final blocks', async () => {
+  const sizes = [];
+  for (const mbps of [10, 100, 500]) {
+    const rt = runtime();
+    const transfer = bytes => bytes * 8 / mbps / 1000;
+    sizes.push(await rt.run('chooseSpeedBlock(' +
+      JSON.stringify({ bytes: 2 * MiB, elapsed: 150 + transfer(2 * MiB) }) + ',' +
+      JSON.stringify({ bytes: 512 * 1024, elapsed: 150 + transfer(512 * 1024) }) + ',' +
+      JSON.stringify({ ok: true, elapsed: 150 + transfer(32768) }) + ',' + budgetCode + ')'));
+  }
+  assert.ok(sizes[0] < sizes[1] && sizes[1] < sizes[2]);
+  assert.equal(sizes[0], 512 * 1024); assert.equal(sizes[2], 16 * MiB);
 });
 
 for (const bodyLimit of [60 * 1024, 48 * 1024, 32 * 1024]) test('sampler: response cap ' + bodyLimit + ' has bounded sequential recovery', async () => {
@@ -892,78 +1000,86 @@ for (const bodyLimit of [60 * 1024, 48 * 1024, 32 * 1024]) test('sampler: respon
   const result = await rt.run("runDownloadSpeedTest('')");
   assert.equal(result.mode, '小响应降级'); assert.ok(result.mbps > 0);
   assert.equal(rt.stats.peakSpeed, 1); assert.ok(rt.calls.length <= 14);
-  assert.ok(speedBytes(rt) < MiB); assert.ok(rt.stats.peakTimers <= 1);
+  assert.ok(speedBytes(rt) < MiB && rt.stats.peakTimers <= 1);
 });
-
 test('sampler: the last allowed small sample may complete the minimum evidence', async () => {
   const rt = runtime({ speedReply: (q, bytes) => bytes > 32 * 1024
     ? { error: 'Response body exceeds size limit', delay: 10 }
     : reply({ byteLength: bytes }, 200, {}, 10) });
   const result = await rt.run("runDownloadSpeedTest('')");
-  assert.equal(result.mode, '小响应降级'); assert.equal(result.elapsed, 100);
-  assert.equal(rt.calls.length, 14);
+  assert.equal(result.mode, '小响应降级'); assert.equal(result.elapsed, 100); assert.equal(rt.calls.length, 14);
 });
-
 for (const status of [403, 429, 500]) test('sampler: HTTP ' + status + ' during small fallback stops immediately', async () => {
   const rt = runtime({ speedReply: (q, bytes) => bytes >= 512 * 1024
     ? { error: 'Response body exceeds size limit' }
     : bytes > 32 * 1024 ? reply({ byteLength: 0 }, status) : undefined });
   const result = await rt.run("runDownloadSpeedTest('')");
-  assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, status);
-  assert.equal(rt.calls.length, 3);
+  assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, status); assert.equal(rt.calls.length, 3);
 });
-
-test('sampler: a complete peer survives a missing callback even without an earlier ramp result', async () => {
-  let n = 0;
-  const rt = runtime({ speedReply: (q, bytes) => ++n === 1 ? reply({ byteLength: bytes }, 200, {}, 300) : 'hang' });
-  // Exercise the same global watchdog with the fixed batch as its only stage.
-  const result = await rt.run("(async()=>{adaptiveDownload=(policy,budget)=>measureDownload(policy,512*1024,2,budget);return runDownloadSpeedTest('');})()");
-  assert.equal(result.mode, '快速采样'); assert.equal(result.mbps, 512 * 1024 * 8 / 300 / 1000);
-  assert.equal(rt.now() - NOW, 8000); assert.equal(rt.calls.length, 2);
-});
-
-test('sampler: duplicate callbacks never double-count successful bytes', async () => {
-  const rt = runtime({ speedReply: (q, bytes) => ({ body: { byteLength: bytes }, status: 200, delay: 300, duplicate: true }) });
-  const result = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000};return measureDownload('',512*1024,2,b);})()");
-  assert.equal(result.mbps, MiB * 8 / 300 / 1000); assert.equal(rt.calls.length, 2);
-});
-
-test('sampler: weighted sequential confirmation does not average different-rate percentages', async () => {
-  let n = 0;
-  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {},
-    bytes <= 32 * 1024 ? 10 : ++n === 1 ? 1100 : 1700) });
+for (const cap of [512 * 1024, 2 * MiB]) {
+  for (const reason of ['body_limit', 'body_mismatch']) test('sampler: short complete ' + cap + '-byte blocks survive larger ' + reason, async () => {
+    const rt = runtime({ speedMbps: 500, latency: 20, speedReply: (q, bytes) => bytes > cap
+      ? reason === 'body_limit' ? { error: 'Response body exceeds size limit' } : reply({ byteLength: bytes - 1 }) : undefined });
+    const result = await rt.run("runDownloadSpeedTest('')");
+    assert.equal(result.mode, '小响应降级'); assert.ok(result.mbps > 0 && result.mbps <= 500);
+    assert.ok(result.elapsed >= 100 && rt.stats.peakSpeed <= 3);
+    assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) > cap).length, cap === 512 * 1024 ? 1 : 3);
+    assert.ok(rt.calls.length <= 16 && speedBytes(rt) <= 64 * MiB);
+  });
+}
+test('sampler: a short earlier block never retries after explicit HTTP rejection', async () => {
+  const rt = runtime({ speedMbps: 500, speedReply: (q, bytes) => bytes >= 2 * MiB ? reply({ byteLength: 0 }, 403) : undefined });
   const result = await rt.run("runDownloadSpeedTest('')");
-  assert.equal(result.mode, '顺序采样');
-  assert.equal(result.mbps, MiB * 8 / 2800 / 1000);
-  assert.equal(result.elapsed, 2800);
+  assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, 403); assert.equal(rt.calls.length, 3);
 });
-
-test('sampler: watchdog closes admission; late successes cannot change an already saved result', async () => {
-  let large = 0;
-  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) =>
-    bytes === 16 * MiB && ++large >= 2 ? reply({ byteLength: bytes }, 200, {}, 9000) : undefined });
+test('sampler: mixed body failure and HTTP rejection must not trigger small-block retries', async () => {
+  let n = 0;
+  const rt = runtime({ speedMbps: 500, latency: 20, speedReply: (q, bytes) => bytes > 2 * MiB
+    ? ++n === 1 ? reply('', 403) : { error: 'Response body exceeds size limit' } : undefined });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.ok(result.failure); assert.equal(rt.calls.length, 6);
+});
+test('sampler: watchdog closes admission and late batch successes cannot overwrite stored fallback', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 300, latency: 150, speedReply: (q, bytes) =>
+    bytes > 2 * MiB ? reply({ byteLength: bytes }, 200, {}, 9000) : undefined });
   const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '快速采样');
+  assert.equal(result.state, 'fresh'); assert.equal(result.mode, '单流估算');
   const saved = rt.store.get(SPEED), count = rt.calls.length;
   await rt.run('new Promise(resolve => setTimeout(resolve, 10000))');
   assert.equal(rt.store.get(SPEED), saved); assert.equal(rt.calls.length, count);
 });
 
-for (const cap of [512 * 1024, 2 * MiB]) {
-  for (const reason of ['body_limit', 'body_mismatch']) test('sampler: short complete ' + cap + '-byte blocks survive a larger ' + reason, async () => {
-    const rt = runtime({ speedMbps: 500, latency: 20, speedReply: (q, bytes) => bytes > cap
-      ? reason === 'body_limit' ? { error: 'Response body exceeds size limit' } : reply({ byteLength: bytes - 1 })
-      : undefined });
-    const result = await rt.run("runDownloadSpeedTest('')");
-    assert.equal(result.mode, '小响应降级'); assert.ok(result.mbps > 0 && result.mbps <= 500);
-    assert.ok(result.elapsed >= 100); assert.equal(rt.stats.peakSpeed, 1);
-    assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) > cap).length, 1);
-    assert.ok(rt.calls.length <= 14); assert.ok(speedBytes(rt) <= 64 * MiB);
-  });
-}
-test('sampler: a short earlier block never causes retries after an explicit HTTP rejection', async () => {
-  const rt = runtime({ speedMbps: 500, speedReply: (q, bytes) => bytes >= 2 * MiB ? reply({ byteLength: 0 }, 403) : undefined });
-  const result = await rt.run("runDownloadSpeedTest('')");
-  assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, 403);
-  assert.equal(rt.calls.length, 3);
+for (const mode of ['多流采样', '单流估算', '小响应降级']) test('speed modes: ' + mode + ' survives caching without becoming fresh or triggering downloads', async () => {
+  const rt = runtime();
+  const result = { mbps: 123, time: NOW - 60000, ip: IP, mode, elapsed: 900, streams: 3, started: 3 };
+  assert.equal(await rt.run('saveSpeedResult(' + JSON.stringify(result) + ')'), true);
+  const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(value.mode, mode); assert.notEqual(value.state, 'fresh'); assert.equal(rt.calls.length, 0);
+  const text = await rt.run('(()=>{const a=[];appendSpeedLines(a,' + JSON.stringify(value) + ");return a.join('\\n');})()");
+  assert.match(text, new RegExp(mode)); assert.doesNotMatch(text, /[●○]/);
+});
+for (const fields of [{}, { version: 1, mode: '双样本采样' }, { version: 2, mode: '多流采样', elapsed: 300, streams: 3, started: 3 },
+  { version: 2, mode: '多流采样', elapsed: 900, streams: 1, started: 3 }]) test('speed cache: unproven legacy/schema mode stays history ' + JSON.stringify(fields), async () => {
+  const rt = runtime({ store: new Map([[SPEED, JSON.stringify({ mbps: 11.2, time: NOW - 60000, ip: IP, ...fields })]]) });
+  const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(value.mode, '历史采样'); assert.equal(value.time, NOW - 60000); assert.equal(rt.calls.length, 0);
+});
+test('speed UI: small-body single-stream fallback has no node-throughput bar', async () => {
+  const rt = runtime();
+  const text = await rt.run("(()=>{const a=[];appendSpeedLines(a,{state:'fresh',mode:'小响应降级',mbps:20});return a.join('\\n');})()");
+  assert.match(text, /^单流 /); assert.match(text, /小响应降级/); assert.doesNotMatch(text, /[●○]/);
+});
+
+test('throughput regression: a per-stream ceiling must lead to a real fixed multi-stream measurement', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 300, streamMbps: 20, latency: 100 });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(result.mode, '多流采样');
+  assert.ok(rt.stats.peakSpeed >= 3, 'final stage must actually issue concurrent requests');
+  assert.ok(result.mbps > 40 && result.mbps <= 60, 'finite three-stream throughput, not a fabricated 300 Mbps');
+});
+test('throughput regression: a single-stream result must not use the node-throughput bar', async () => {
+  const rt = runtime();
+  const lines = await rt.run("(()=>{const lines=[];appendSpeedLines(lines,{state:'fresh',mode:'单流估算',mbps:23.2});return lines.join('\\n');})()");
+  assert.match(lines, /单流估算/);
+  assert.doesNotMatch(lines, /[●○]/);
 });
