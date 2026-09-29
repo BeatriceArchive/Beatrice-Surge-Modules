@@ -1,5 +1,5 @@
 #!name=贝蒂的基础面板
-#!desc=1.5.0：Net.Coffee 单源出口、归属与原始 Trust；特殊用途 IP 过滤；网站可达性、流量；手动刷新自适应测速（最多 128 MiB），自动刷新不测速。
+#!desc=1.5.1：紧凑网络面板；保留有效测速初测、精测失败自动回退；历史结果独立标注；Net.Coffee 单源 IP 情报；自动刷新不测速，手动最多 8 秒 / 128 MiB。
 #!category=🩺 网络工具
 #!system=ios
 # Copyright (c) 2026 BeatriceArchive
