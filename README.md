@@ -11,7 +11,7 @@
 | 模块 | 当前用途 | 版本 / 状态 |
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
-| `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.4.1 |
+| `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.0 |
 | `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.10.0 |
 | `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.0 |
 
@@ -45,7 +45,9 @@
 - `icmp-forwarding = false`
 - `loglevel = notify`
 
-它不添加 MITM、Rewrite、Script、Panel 或策略组。
+它不添加 MITM、Rewrite、Script、Panel 或策略组，也不覆盖托管配置的 DNS / DoH、`skip-proxy` 或 `tun-excluded-routes`。
+
+严格源公网 IP 白名单环境下，关闭全局 Wi-Fi Assist / Hybrid 可减少主动蜂窝分流，IPv6 基线减少地址族漂移，但不能固定公网源 IP：物理网络切换、节点显式 IPv6 地址、节点 `hybrid=on` 或 SSID 级蜂窝回退仍需按托管配置与实机行为确认。System 不修改机场节点、策略组或规则。
 
 ### Betty-Basic-Panel.sgmodule
 
@@ -60,8 +62,8 @@ YS=1&RISK=1
 核心能力：
 
 - 本地 IPv4 / IPv6、DNS、NAT / CGNAT 状态
-- 当前观测出口、国家 / ASN / 机构交叉验证
-- ProxyCheck / ipapi.is 的原始信誉信号，不计算“综合纯净度”
+- Net.Coffee 单源观测出口、国家 / 地区 / 城市、ASN / ISP / 机构
+- Net.Coffee 原始 Trust 与独立类型 / 信誉信号，不计算“综合纯净度”
 - DIRECT 与当前规则 / 可选策略的延迟
 - Netflix、YouTube、Disney+、Spotify、TikTok、Prime 入口可达性
 - ChatGPT、Claude、Gemini、DeepSeek、Grok、Perplexity 可达性
