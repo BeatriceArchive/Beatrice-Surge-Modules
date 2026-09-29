@@ -21,11 +21,7 @@ function shape(v, depth=0) {
   return typeof v;
 }
 
-const path="/api/ip/lookup/1.1.1.1";
-const body=await read(path);
-try { const d=JSON.parse(body);log({path,schema:shape(d),sample:{ip:d.ip,countryCode:d.countryCode,asn:d.asn,asOrganization:d.asOrganization,trust_score:d.trust_score,isResidential:d.isResidential,is_datacenter:d.is_datacenter,is_vpn:d.is_vpn,is_proxy:d.is_proxy,is_tor:d.is_tor}}); } catch { log({path,json:false}); }
-const home=await read("/");
-log({publicPolicyLinks:[...home.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)].filter(m=>/terms|privacy|api|使用条款|隐私|限流|服务条款/i.test(m[0])).slice(0,10).map(m=>({href:m[1],label:m[2].replace(/<[^>]*>/g,"").slice(0,100)}))});
-const trace=await read("/cdn-cgi/trace");
-const ips=trace.split("\n").filter(l=>l.startsWith("ip="));
-log({path:"/cdn-cgi/trace",ipFields:ips.length,IPFamily:ips.length===1?(ips[0].includes(":")?6:4):null});
+for(const ip of ["8.8.8.8","2606:4700:4700::1111"]){
+ const path="/api/ip/lookup/"+encodeURIComponent(ip), body=await read(path);
+ try{const d=JSON.parse(body);log({path,schema:shape(d),sample:{ip:d.ip,countryCode:d.countryCode,asn:d.asn,asOrganization:d.asOrganization,isp:d.isp,company_type:d.company_type,trust_score:d.trust_score,isResidential:d.isResidential,is_datacenter:d.is_datacenter,is_vpn:d.is_vpn,is_proxy:d.is_proxy,is_tor:d.is_tor}});}catch{log({path,json:false});}
+}
