@@ -6,19 +6,23 @@ import { readFileSync } from 'node:fs';
 const SOURCE = readFileSync(new URL('../Scripts/Betty-Basic-Panel.js', import.meta.url), 'utf8');
 const NOW = Date.UTC(2026, 8, 11, 12);
 const IP = '8.8.4.4', OTHER = '1.1.1.1';
-const INTEL = 'betty.basic.intel.v1', SPEED = 'betty.basic.speed';
-const who = (ip = IP, country = 'HK', asn = 15169) => ({ ip, success: true, country_code: country, country: country === 'HK' ? 'Hong Kong' : 'Singapore', connection: { asn, org: 'Example Networks' } });
-const api = (ip = IP, country = 'HK', flags = {}) => ({ ip, location: { country_code: country }, asn: { asn: 15169, org: 'Example Networks' }, ...flags });
-const pc = (ip = IP, detections = {}, type = 'Hosting') => ({ status: 'ok', [ip]: { network: { type }, detections: { vpn: true, proxy: false, tor: false, hosting: type === 'Hosting', risk: 50, confidence: 98, ...detections } } });
+const INTEL = 'betty.basic.intel.v2', SPEED = 'betty.basic.speed';
+const trace = (ip = IP) => 'fl=fixture\nip=' + ip + '\nloc=HK\n';
+const geo = () => ({ country: 'Hong Kong', country_code: 'hk', region: 'Hong Kong', city: 'Kowloon', isp: 'Example Networks' });
+const lookup = (ip = IP, fields = {}) => ({ ip, country: 'Hong Kong', countryCode: 'hk', region: 'Hong Kong', city: 'Kowloon',
+  asn: 15169, asOrganization: 'Example Networks', isp: 'Example ISP', company_name: 'Example Company',
+  company_type: 'hosting', trust_score: 85, isResidential: false, is_datacenter: true,
+  is_vpn: true, is_proxy: false, is_tor: false, is_abuser: false, is_mobile: false, is_crawler: false, ...fields });
 const reply = (body, status = 200, headers = {}, delay = 10) => ({ body, status, headers, delay });
 
 function defaultReply(q) {
   const u = new URL(q.url);
-  if (u.hostname === 'speed.cloudflare.com' && u.pathname === '/meta') return reply({ clientIp: IP, country: 'HK', asn: 15169, asOrganization: 'Example Networks' });
-  if (u.hostname === 'ipwho.is') return reply(who(u.pathname.length > 1 ? decodeURIComponent(u.pathname.slice(1)) : IP));
-  if (u.hostname === 'api.ipapi.is') return reply(api(u.searchParams.get('q'), 'HK', { is_vpn: true, is_proxy: false, is_tor: false, is_datacenter: true }));
-  if (u.hostname === 'proxycheck.io') return reply(pc(decodeURIComponent(u.pathname.slice(4))));
-  if (u.hostname === 'api.ipify.org') return reply({ ip: IP });
+  if (u.hostname === 'ip.net.coffee') {
+    if (u.pathname === '/cdn-cgi/trace') return reply(trace());
+    if (u.pathname.startsWith('/api/ip/lookup/')) return reply(lookup(decodeURIComponent(u.pathname.slice('/api/ip/lookup/'.length))));
+    if (u.pathname.startsWith('/api/geoip/')) return reply(geo());
+    throw new Error('unexpected intelligence endpoint');
+  }
   if (u.hostname === 'www.netflix.com') return reply('<title>Netflix</title><link href="https://www.netflix.com/hk/title/81280792"><script>{"countryCode":"HK"}</script>');
   if (u.hostname === 'www.youtube.com') return reply('<title>YouTube Premium</title>');
   if (u.pathname === '/generate_204') return reply('', 204);
@@ -70,7 +74,8 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
     Date: Clock, Math, Uint8Array, ArrayBuffer, console: { log: (...args) => logs.push(args) },
     setTimeout: (fn, ms) => schedule(fn, ms, 'timer'),
     $network: network, $trigger: trigger, $input: { purpose: 'panel', panelName: '贝蒂的基础面板' }, $argument: argument,
-    $persistentStore: { read: k => store.get(k) || '', write: (v, k) => {
+    $persistentStore: { read: k => { if (failStore === 'throw') throw new Error('store unavailable'); return store.get(k) || ''; }, write: (v, k) => {
+      if (failStore === 'throw') throw new Error('store unavailable');
       if (failStore) return false; store.set(k, v); writes.push({ key: k, value: v }); return true;
     } },
     $httpClient: client,
@@ -96,125 +101,6 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
   }
   return { context, run, calls, apiCalls, store, writes, logs, done, stats, now: () => clock };
 }
-
-for (const scenario of [
-  { name: 'agreement', countries: ['HK', 'HK'], expected: 'HK', count: 3, total: 3, disagreement: false },
-  { name: 'majority with disagreement', countries: ['SG', 'HK'], expected: 'HK', count: 2, total: 3, disagreement: true },
-  { name: 'one Geo source fails', countries: [null, 'HK'], expected: 'HK', count: 2, total: 2, disagreement: false },
-  { name: 'two-source tie has no invented winner', countries: ['SG', null], expected: '', count: 1, total: 2, disagreement: true }
-]) test(`geo: ${scenario.name}`, async () => {
-  const rt = runtime({ respond: q => {
-    const u = new URL(q.url);
-    if (u.hostname === 'ipwho.is') return scenario.countries[0] ? reply(who(IP, scenario.countries[0])) : null;
-    if (u.hostname === 'api.ipapi.is') return scenario.countries[1] ? reply(api(IP, scenario.countries[1])) : null;
-    return defaultReply(q);
-  } });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.country, scenario.expected); assert.equal(exit.countryVote.count, scenario.count);
-  assert.equal(exit.countryVote.total, scenario.total); assert.equal(exit.countryVote.disagreement, scenario.disagreement);
-});
-
-test('geo: all discovery sources fail without old exit or risk data', async () => {
-  const store = new Map([[INTEL, JSON.stringify({ version: 1, ip: IP, entries: { IPWho: { time: NOW, data: who() } } })]]);
-  const rt = runtime({ store, respond: () => null });
-  const value = await rt.run("getNetworkIntelligence('')");
-  assert.equal(value.exit.ip, ''); assert.equal(value.exit.countryVote.total, 0); assert.equal(value.risk.available, false);
-  assert.equal(rt.calls.length, 3);
-});
-
-test('geo: fallback discovery is reused, never queried twice or counted twice', async () => {
-  const rt = runtime({ respond: q => q.url.includes('/meta') ? null : defaultReply(q) });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.ip, IP); assert.equal(exit.countryVote.total, 2);
-  assert.equal(rt.calls.filter(q => new URL(q.url).hostname === 'ipwho.is').length, 1);
-});
-
-test('geo: explicit same-IP queries ignore data for another route/exit', async () => {
-  const rt = runtime({ respond: q => q.url.includes('ipwho.is') ? reply(who(OTHER)) : defaultReply(q) });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.countryVote.total, 2);
-  for (const q of rt.calls.filter(q => /ipwho.is|api.ipapi.is|proxycheck.io/.test(q.url))) assert.ok(q.url.includes(IP));
-});
-
-test('geo: current anonymous IPAPI name/ASN shape contributes only matching geography, never risk', async () => {
-  const rt = runtime({ respond: q => q.url.includes('api.ipapi.is') ? reply({ ip: IP, country: 'Hong Kong', company: 'Example Networks', asn: 'AS15169 Example Networks' }) : defaultReply(q) });
-  const value = await rt.run("getNetworkIntelligence('')");
-  assert.equal(value.exit.countryVote.count, 3); assert.equal(value.exit.asnVote.count, 3);
-  assert.equal(value.risk.count, 1); assert.equal(value.risk.comparable, 0);
-  rt.context.risk = value.risk;
-  const text = await rt.run('(()=>{const lines=[];appendRiskLines(lines,risk);return lines.join("\\n")})()');
-  assert.match(text, /IPAPI：无风险字段/); assert.match(text, /未交叉确认/);
-});
-
-test('geo: ASN ties and organization aliases do not acquire false consensus', async () => {
-  const rt = runtime({ argument: 'RISK=0', respond: q => q.url.includes('ipwho.is') ? reply(who(IP, 'HK', 13335)) : defaultReply(q) });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.asn, null); assert.equal(exit.org, ''); assert.equal(exit.asnVote.disagreement, true);
-});
-
-test('cache: same exit uses bounded cache; switching IP invalidates every Geo/reputation entry', async () => {
-  const store = new Map();
-  const first = runtime({ store }); await first.run("getNetworkIntelligence('')");
-  const same = runtime({ store, clockStart: NOW + 1000 }); await same.run("getNetworkIntelligence('')");
-  assert.equal(same.calls.length, 1, 'fresh exit observation is mandatory even with cache');
-  const next = runtime({ store, clockStart: NOW + 2000, respond: q => q.url.includes('/meta') ? reply({ clientIp: OTHER, country: 'SG', asn: 13335 }) : defaultReply(q) });
-  const { exit } = await next.run("getNetworkIntelligence('')");
-  assert.equal(exit.ip, OTHER); assert.equal(next.calls.length, 4);
-  assert.equal(JSON.parse(store.get(INTEL)).ip, OTHER);
-  assert.equal(next.calls.slice(1).every(q => q.url.includes(OTHER)), true);
-  const expired = runtime({ store, clockStart: NOW + 7200000 }); await expired.run("getNetworkIntelligence('')");
-  assert.equal(expired.calls.length, 4);
-});
-
-for (const failure of ['{', '[]', '{}', 'null', '{"version":1,"ip":"8.8.4.4","entries":null}']) test(`cache: malformed record ${failure}`, async () => {
-  const rt = runtime({ store: new Map([[INTEL, failure]]) });
-  const { exit } = await rt.run("getNetworkIntelligence('')"); assert.equal(exit.country, 'HK');
-});
-
-test('reputation: source scores and comparable signals agree without a purity score', async () => {
-  const rt = runtime(); const value = await rt.run("getNetworkIntelligence('')");
-  assert.equal(value.risk.risk, 50); assert.equal(value.risk.confidence, 98);
-  assert.equal(value.risk.count, 2); assert.equal(value.risk.conflicts, 0); assert.equal(value.risk.comparable, 4);
-  rt.context.risk = value.risk;
-  const lines = await rt.run('(()=>{const l=[];appendRiskLines(l,risk);return l.join("\\n")})()');
-  assert.match(lines, /PC Risk 50\/100/); assert.match(lines, /2\/2/); assert.doesNotMatch(lines, /纯净|综合.*分/);
-});
-
-test('reputation: ProxyCheck failure degrades to available IPAPI signals without inventing a score', async () => {
-  const rt = runtime({ respond: q => q.url.includes('proxycheck.io') ? null : defaultReply(q) });
-  const { risk } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(risk.available, true); assert.equal(risk.count, 1); assert.equal(risk.risk, null);
-});
-
-test('reputation: conflicting comparable signals are explicit; hosting plus VPN alone is not a conflict', async () => {
-  const rt = runtime({ respond: q => q.url.includes('api.ipapi.is') ? reply(api(IP, 'HK', { is_vpn: false, is_datacenter: true })) : defaultReply(q) });
-  const { risk } = await rt.run("getNetworkIntelligence('')"); assert.equal(risk.conflicts, 1); assert.equal(risk.comparable, 2);
-  const onlyHosting = runtime({ respond: q => q.url.includes('api.ipapi.is') ? reply(api(IP, 'HK', { is_datacenter: true })) : defaultReply(q) });
-  assert.equal((await onlyHosting.run("getNetworkIntelligence('')")).risk.conflicts, 0);
-});
-
-for (const response of [reply('{'), reply([], 200), reply(pc(OTHER)), reply(pc(IP, { risk: '99', confidence: null })), reply({ status: 'denied' })]) test(`reputation: malformed/wrong-IP/missing numeric data ${JSON.stringify(response.body).slice(0,45)}`, async () => {
-  const rt = runtime({ respond: q => q.url.includes('proxycheck.io') ? response : defaultReply(q) });
-  const { risk } = await rt.run("getNetworkIntelligence('')"); assert.equal(risk.risk, null); assert.equal(risk.highRisk, false);
-});
-
-test('rate limit: 429 honors Retry-After, survives IP changes and does not retry in a run', async () => {
-  const store = new Map();
-  const first = runtime({ store, respond: q => q.url.includes('api.ipapi.is') ? reply({ error: 'ERR_FREE_TIER_EXHAUSTED' }, 429, { 'Retry-After': '86400' }) : defaultReply(q) });
-  await first.run("getNetworkIntelligence('')");
-  assert.equal(first.calls.filter(q => q.url.includes('api.ipapi.is')).length, 1);
-  const next = runtime({ store, clockStart: NOW + 1000, respond: q => q.url.includes('/meta') ? reply({ clientIp: OTHER, country: 'SG' }) : defaultReply(q) });
-  await next.run("getNetworkIntelligence('')");
-  assert.equal(next.calls.filter(q => q.url.includes('api.ipapi.is')).length, 0);
-  const later = runtime({ store, clockStart: NOW + 86401000 }); await later.run("getNetworkIntelligence('')");
-  assert.equal(later.calls.filter(q => q.url.includes('api.ipapi.is')).length, 1);
-});
-
-test('sources: hung API callback is bounded independently', async () => {
-  const rt = runtime({ respond: q => q.url.includes('ipwho.is') ? 'hang' : defaultReply(q) });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.countryVote.total, 2); assert.ok(rt.now() - NOW <= 7100);
-});
 
 for (const [status, state] of [[200, 'reachable'], [302, 'reachable'], [401, 'restricted'], [403, 'restricted'], [429, 'restricted'], [405, 'unknown'], [500, 'unknown']]) test(`AI/site: HTTP ${status} means ${state}, not full availability`, async () => {
   const rt = runtime({ respond: () => reply('', status) });
@@ -311,11 +197,11 @@ test('website fallback: auto refresh adds at most two GETs, does not speed test 
   const store = new Map();
   const rt = runtime({ store, respond: q => METHOD_FALLBACK_SITES.some(host => q.url === `https://${host}/`) ? reply('', q.method === 'head' ? 405 : 403) : defaultReply(q) });
   await rt.run('main()');
-  assert.equal(rt.calls.length, 20); assert.ok(rt.stats.peak <= 17);
+  assert.equal(rt.calls.length, 18); assert.ok(rt.stats.peak <= 16);
   assert.equal(rt.calls.filter(q => q.url.includes('/__down')).length, 0);
   assert.match(rt.done[0].content, /流媒体 · 可达 4\/6 · 受限 2/);
-  assert.match(rt.done[0].content, /Geo 3\/3 一致 · ASN 3\/3 一致/);
-  assert.match(rt.done[0].content, /可比信号一致 2\/2 源/);
+  assert.match(rt.done[0].content, /Net\.Coffee · 单源/);
+  assert.match(rt.done[0].content, /Trust 85\/100/);
   assert.match(rt.done[0].content, /TikTok 受限 403 \(GET 403\)/);
   assert.doesNotMatch(rt.done[0].content, /地区受限/);
   const next = runtime({ store, clockStart: NOW + 60000, respond: q => METHOD_FALLBACK_SITES.some(host => q.url === `https://${host}/`) ? reply('', q.method === 'head' ? 405 : 200) : defaultReply(q) });
@@ -444,7 +330,7 @@ test('profile: local traffic avoids network; redirect/error headers cannot fabri
 
 test('main: request budget, no auto speed, masked IP, optional policy, no credentials or unrelated mutations', async () => {
   const rt = runtime(); await rt.run('main()');
-  assert.equal(rt.done.length, 1); assert.equal(rt.calls.length, 18); assert.ok(rt.stats.peak <= 20);
+  assert.equal(rt.done.length, 1); assert.equal(rt.calls.length, 16); assert.ok(rt.stats.peak <= 16);
   assert.equal(rt.calls.some(q => q.url.includes('/__down')), false);
   assert.match(rt.done[0].content, /8\.8\.\*\.\*/); assert.equal(rt.done[0].content.includes(IP), false);
   assert.ok(rt.calls.every(q => q['auto-cookie'] === false && q['auto-redirect'] === false));
@@ -475,32 +361,6 @@ test('module: exactly one panel, privacy defaults and no extra interception or f
   assert.doesNotMatch(module, /\[(?:MITM|Rule|URL Rewrite|Header Rewrite)\]|POLICY=/);
 });
 
-test('reputation: live v3 shape uses detection booleans separately from network allocation', async () => {
-  const rt = runtime();
-  rt.context.sample = pc(IP, { hosting: false, vpn: false, risk: 31, confidence: 100 }, 'Hosting');
-  const parsed = await rt.run("parseProxyCheck(sample,'8.8.4.4')");
-  assert.equal(parsed.signals.hosting, false); assert.equal(parsed.type, 'Hosting');
-  assert.equal(parsed.risk, 31); assert.equal(parsed.confidence, 100);
-  rt.context.parsed = parsed;
-  assert.equal(await rt.run('signalLabel(parsed)'), '机房分配');
-  rt.context.sample[IP].detections.compromised = true;
-  assert.match(await rt.run("signalLabel(parseProxyCheck(sample,'8.8.4.4'))"), /失陷标记/);
-});
-
-test('geo: unnormalized country names are flagged, not guessed or counted as disagreement', async () => {
-  const rt = runtime({ respond: q => q.url.includes('api.ipapi.is') ? reply({ ip: IP, country: 'Unmapped fixture country', asn: 'AS15169 Example' }) : defaultReply(q) });
-  const { exit } = await rt.run("getNetworkIntelligence('')");
-  assert.equal(exit.countryVote.total, 2); assert.equal(exit.unmappedCountry, true); assert.equal(exit.countryVote.disagreement, false);
-  rt.context.exit = exit; assert.match(await rt.run('geoAgreementLine(exit)'), /名称待核对/);
-});
-
-test('geo: placeholder country and invalid ASN do not add confident metadata', async () => {
-  const rt = runtime();
-  rt.context.d = { clientIp: IP, country: 'XX', asn: 1e20, asOrganization: '' };
-  const result = await rt.run('parseCloudflare(d)'); assert.equal(result.country, ''); assert.equal(result.asn, null);
-  const v = await rt.run("vote(['constructor','constructor','other'])"); assert.equal(v.count, 2); assert.equal(v.value, 'constructor');
-});
-
 test('profile: malformed numeric suffixes and contradictory duplicate fields are not traffic data', async () => {
   const rt = runtime();
   for (const header of ['upload=1e9; download=2; total=100', 'upload=1; download=2; total=100junk', 'upload=1; download=2; total=100; total=200']) {
@@ -529,18 +389,8 @@ test('main: button performs bounded adaptive test, explicit policy stays out of 
 
 test('parameters: RISK=0 makes no reputation query; YS=0 deliberately reveals IP', async () => {
   const rt = runtime({ argument: 'RISK=0&YS=0' }); await rt.run('main()');
-  assert.equal(rt.calls.some(q => /proxycheck.io|api.ipapi.is/.test(q.url)), false);
+  assert.equal(rt.calls.some(q => /\/api\/ip\/lookup\/|\/api\/iprisk\//.test(q.url)), false);
   assert.match(rt.done[0].content, /IP 信誉 · 已关闭/); assert.ok(rt.done[0].content.includes(IP));
-});
-
-test('cache: malformed nested source data is refetched independently rather than crashing the panel', async () => {
-  const store = new Map(); const first = runtime({ store }); await first.run("getNetworkIntelligence('')");
-  const cache = JSON.parse(store.get(INTEL)); cache.entries.IPAPI.data.countryName = { malformed: true };
-  store.set(INTEL, JSON.stringify(cache));
-  const rt = runtime({ store, clockStart: NOW + 1000 }); await rt.run('main()');
-  assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /Geo 3\/3/);
-  assert.equal(rt.calls.filter(q => /ipapi.is/.test(q.url)).length, 1);
-  assert.equal(rt.calls.filter(q => /proxycheck.io|ipwho.is/.test(q.url)).length, 0);
 });
 
 test('media: transport error with partial HTTP 200 body cannot establish catalogue or Premium evidence', async () => {
@@ -549,4 +399,250 @@ test('media: transport error with partial HTTP 200 body cannot establish catalog
       body: '<title>Netflix</title>/title/81280792 {"ypcOffers":[{"ypcOfferId":"fixture"}]}' }) });
     const value = await rt.run(fn + "('')"); assert.equal(value.state, 'unreachable'); assert.equal(value.label, '不可达');
   }
+});
+
+for (const ip of [IP, '2606:4700:4700::1111']) test('Net.Coffee: current IP and combined Geo/ASN/Trust ' + ip, async () => {
+  const rt = runtime({ respond: q => q.url.includes('/cdn-cgi/trace') ? reply(trace(ip)) : defaultReply(q) });
+  const { exit, risk } = await rt.run("getNetworkIntelligence('')");
+  assert.equal(exit.ip, ip); assert.equal(exit.country, 'HK'); assert.equal(exit.region, 'Hong Kong'); assert.equal(exit.city, 'Kowloon');
+  assert.equal(exit.asn, 15169); assert.equal(exit.org, 'Example Networks'); assert.equal(exit.isp, 'Example ISP'); assert.equal(exit.company, 'Example Company');
+  assert.equal(risk.trust, 85); assert.equal(risk.signals.hosting, true); assert.equal(risk.signals.residential, false);
+  assert.equal(rt.calls.length, 2); assert.ok(rt.calls.every(q => new URL(q.url).hostname === 'ip.net.coffee'));
+  assert.ok(rt.calls[1].url.endsWith(encodeURIComponent(ip)));
+});
+
+test('Net.Coffee: equivalent IPv6 responses and cache keys refer to the same address', async () => {
+  const ip = '2606:4700:4700::1111', expanded = '2606:4700:4700:0000:0000:0000:0000:1111', store = new Map();
+  const first = runtime({ store, respond: q => q.url.includes('/cdn-cgi/trace') ? reply(trace(expanded)) : reply(lookup(ip)) });
+  assert.equal((await first.run("getNetworkIntelligence('')")).risk.ip, ip);
+  const next = runtime({ store, clockStart: NOW + 1000, respond: () => reply(trace(ip)) });
+  assert.equal((await next.run("getNetworkIntelligence('')")).risk.trust, 85); assert.equal(next.calls.length, 1);
+});
+
+for (const trust of [0, 0.5, 100, -1, 101, null, '85', true, {}, undefined]) test('Net.Coffee: Trust numeric boundaries ' + JSON.stringify(trust), async () => {
+  const rt = runtime({ respond: q => q.url.includes('/api/ip/lookup/') ? reply(lookup(IP, { trust_score: trust })) : defaultReply(q) });
+  const { risk } = await rt.run("getNetworkIntelligence('')");
+  const expected = typeof trust === 'number' && trust >= 0 && trust <= 100 ? trust : null;
+  assert.equal(risk.trust, expected);
+  rt.context.risk = risk;
+  const text = await rt.run('(()=>{const a=[];appendRiskLines(a,risk);return a.join("\\n")})()');
+  assert.match(text, expected === null ? /Trust 未知/ : new RegExp('Trust ' + expected + '/100'));
+  assert.doesNotMatch(text, /纯净|综合|共识|Risk \d|交叉/);
+});
+
+test('Net.Coffee: independent residential/hosting/business/proxy/VPN/Tor signals preserve null', async () => {
+  const rt = runtime(); rt.context.input = lookup(IP, { company_type: 'business', isResidential: true, is_datacenter: true,
+    is_vpn: null, is_proxy: false, is_tor: true, is_mobile: 'false', is_abuser: 0 });
+  const risk = await rt.run("parseNetCoffeeRisk(input,'8.8.4.4')");
+  assert.equal(risk.signals.residential, true); assert.equal(risk.signals.hosting, true); assert.equal(risk.type, 'business');
+  assert.equal(risk.signals.vpn, null); assert.equal(risk.signals.proxy, false); assert.equal(risk.signals.tor, true);
+  assert.equal(risk.signals.mobile, null); assert.equal(risk.signals.abuse, null);
+  rt.context.risk = risk;
+  const text = await rt.run('(()=>{const a=[];appendRiskLines(a,risk);return a.join("\\n")})()');
+  assert.match(text, /商业 · 住宅 是 · 机房 是/); assert.match(text, /VPN 未知 · 代理 否 · Tor 是/);
+});
+
+test('Net.Coffee: missing/wrong-type metadata never coerces objects into labels', async () => {
+  const rt = runtime();
+  rt.context.input = { ip: IP, countryCode: 'XX', country: {}, region: [], city: 123, asn: 'AS15169',
+    asOrganization: {}, company_name: [], isp: false, company_type: {}, trust_score: null, is_vpn: 'false' };
+  assert.equal(await rt.run("parseNetCoffeeRisk(input,'8.8.4.4')"), null);
+  rt.context.input.trust_score = 0;
+  const value = await rt.run("parseNetCoffeeRisk(input,'8.8.4.4')");
+  assert.equal(value.country, ''); assert.equal(value.asn, null); assert.equal(value.org, ''); assert.equal(value.type, '');
+  assert.ok(Object.values(value.signals).every(x => x === null));
+});
+
+for (const body of ['{', '[]', 'null', {}, { ip: IP }, lookup(OTHER), lookup(IP, { is_bogon: true }),
+  lookup(IP, { error: 'fixture-secret' }), 'x'.repeat(65537)]) test('Net.Coffee: invalid or mismatched lookup degrades to same-IP Geo ' + (typeof body === 'string' ? body.slice(0,8) : JSON.stringify(body).slice(0,30)), async () => {
+  const rt = runtime({ respond: q => q.url.includes('/api/ip/lookup/') ? reply(body) : defaultReply(q) });
+  const { exit, risk } = await rt.run("getNetworkIntelligence('')");
+  assert.equal(exit.ip, IP); assert.equal(exit.country, 'HK'); assert.equal(risk.ip, '');
+  assert.equal(exit.asn, null, 'Geo does not provide ASN'); assert.equal(rt.calls.length, 3);
+  assert.ok(rt.calls[2].url.endsWith(IP)); assert.equal(JSON.stringify(rt.writes).includes('fixture-secret'), false);
+});
+
+for (const body of [geo(), { ...geo(), ip: IP }, { ...geo(), ip: OTHER }, { ...geo(), ip: null }, { country_code: 'ZZ', asn: 1e20 }, '{}', '{']) test('Net.Coffee: Geo query binding and partial schema ' + JSON.stringify(body), async () => {
+  const rt = runtime({ argument: 'RISK=0', respond: q => q.url.includes('/api/geoip/') ? reply(body) : defaultReply(q) });
+  const { exit } = await rt.run("getNetworkIntelligence('')");
+  const valid = typeof body === 'object' && body.country_code === 'hk' && (!('ip' in body) || body.ip === IP);
+  assert.equal(exit.country, valid ? 'HK' : ''); assert.equal(exit.ip, IP);
+  assert.equal(rt.calls.length, 2); assert.ok(rt.calls.every(q => !q.url.includes('/api/ip/lookup/')));
+});
+
+test('Net.Coffee: Geo fallback accepts equivalent IPv6 text, never an unrelated IP', async () => {
+  const rt = runtime(); rt.context.data = { ...geo(), ip: '2606:4700:4700:0:0:0:0:1111' };
+  assert.equal((await rt.run("parseNetCoffeeGeo(data,'2606:4700:4700::1111')")).ip, '2606:4700:4700::1111');
+  assert.equal(await rt.run("parseNetCoffeeGeo(data,'2001:4860:4860::8888')"), null);
+});
+
+for (const body of ['ip=192.0.2.1\n', 'ip=2001:db8::1\n', 'ip=' + IP + '\nip=' + OTHER, '{"ip":"' + IP + '"}', '<html>WAF</html>', 'x'.repeat(4097)]) test('Net.Coffee: invalid trace stops intelligence without sending an explicit query ' + body.slice(0,35), async () => {
+  const rt = runtime({ respond: () => reply(body) });
+  const { exit, risk } = await rt.run("getNetworkIntelligence('')");
+  assert.equal(exit.ip, ''); assert.equal(risk.ip, ''); assert.equal(rt.calls.length, 1);
+});
+
+test('cache: fresh observation, same-IP hits, expiry, and exit switches', async () => {
+  const store = new Map(); const first = runtime({ store }); await first.run("getNetworkIntelligence('')");
+  const same = runtime({ store, clockStart: NOW + 1000 }); await same.run("getNetworkIntelligence('')"); assert.equal(same.calls.length, 1);
+  const next = runtime({ store, clockStart: NOW + 2000, respond: q => q.url.includes('/cdn-cgi/trace') ? reply(trace(OTHER)) : defaultReply(q) });
+  const { exit } = await next.run("getNetworkIntelligence('')"); assert.equal(exit.ip, OTHER); assert.equal(next.calls.length, 2);
+  assert.equal(JSON.parse(store.get(INTEL)).ip, OTHER); assert.ok(next.calls[1].url.endsWith(OTHER));
+  const expired = runtime({ store, clockStart: NOW + 7200000 }); await expired.run("getNetworkIntelligence('')"); assert.equal(expired.calls.length, 2);
+});
+
+test('cache: expired data and failed fresh discovery never become stale fallback', async () => {
+  const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
+  const missing = runtime({ store, clockStart: NOW + 1000, respond: () => null });
+  const result = await missing.run("getNetworkIntelligence('')"); assert.equal(result.exit.ip, ''); assert.equal(result.risk.ip, ''); assert.equal(missing.calls.length, 1);
+  const expires = JSON.parse(store.get(INTEL)).entries.risk.time + 3600000;
+  const expired = runtime({ store, clockStart: expires + 1, respond: q => q.url.includes('/cdn-cgi/trace') ? defaultReply(q) : null });
+  const value = await expired.run("getNetworkIntelligence('')");
+  assert.equal(value.exit.ip, IP); assert.equal(value.exit.country, ''); assert.equal(value.risk.ip, '');
+  assert.deepEqual(Object.keys(JSON.parse(store.get(INTEL)).entries), []);
+});
+
+for (const record of ['{', '[]', '{}', 'null', '{"version":1,"ip":"8.8.4.4","entries":{}}', '{"version":2,"ip":"8.8.4.4","entries":null}']) test('cache: malformed and old schemas ' + record, async () => {
+  const rt = runtime({ store: new Map([[INTEL, record], ['betty.basic.intel.v1', '{"version":1,"ip":"1.1.1.1"}']]) });
+  const { exit } = await rt.run("getNetworkIntelligence('')"); assert.equal(exit.country, 'HK'); assert.equal(rt.calls.length, 2);
+});
+
+for (const field of ['signals', 'trust', 'countryName', 'time']) test('cache: invalid nested ' + field + ' is refetched', async () => {
+  const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
+  const cache = JSON.parse(store.get(INTEL));
+  if (field === 'time') cache.entries.risk.time = NOW + 60000;
+  else cache.entries.risk.data[field] = field === 'trust' ? '100' : {};
+  store.set(INTEL, JSON.stringify(cache));
+  const rt = runtime({ store, clockStart: NOW + 1000 }); await rt.run("getNetworkIntelligence('')"); assert.equal(rt.calls.length, 2);
+});
+
+for (const [header, wait] of [['120', 120000], ['0', 60000], ['1', 60000], ['999999999', 7 * 86400000],
+  [new Date(NOW - 1000).toUTCString(), 60000], [new Date(NOW + 300000).toUTCString(), 300000], ['', 86400000], ['nonsense', 86400000]]) test('Net.Coffee: 429 Retry-After ' + header, async () => {
+  const store = new Map();
+  const first = runtime({ store, respond: q => q.url.includes('/api/ip/lookup/') ? reply({}, 429, { 'Retry-After': header }) : defaultReply(q) });
+  await first.run("getNetworkIntelligence('')");
+  const until = JSON.parse(store.get('betty.basic.backoff.NetCoffeeRisk')).until;
+  assert.ok(Math.abs(until - (NOW + wait)) <= 30);
+  assert.equal(first.calls.filter(q => q.url.includes('/api/ip/lookup/')).length, 1);
+  const next = runtime({ store, clockStart: NOW + 1000, respond: q => q.url.includes('/cdn-cgi/trace') ? reply(trace(OTHER)) : defaultReply(q) });
+  await next.run("getNetworkIntelligence('')"); assert.ok(next.calls.every(q => !q.url.includes('/api/ip/lookup/')));
+  const later = runtime({ store, clockStart: until + 1 }); await later.run("getNetworkIntelligence('')");
+  assert.equal(later.calls.filter(q => q.url.includes('/api/ip/lookup/')).length, 1);
+});
+
+for (const failure of [reply({}, 403), reply({}, 500), reply('{}', 302, { location: 'https://other.invalid/' }), null, 'hang',
+  { status: 200, error: 'partial response', responseOnError: true, body: lookup() }]) test('Net.Coffee: lookup failure has bounded same-site Geo fallback ' + (failure === 'hang' ? 'watchdog' : failure?.status || 'network'), async () => {
+  const rt = runtime({ respond: q => q.url.includes('/api/ip/lookup/') ? failure : defaultReply(q) });
+  const { exit, risk } = await rt.run("getNetworkIntelligence('')");
+  assert.equal(exit.ip, IP); assert.equal(risk.ip, ''); assert.equal(rt.calls.length, 3); assert.ok(rt.now() - NOW < 7100);
+  assert.equal(!!rt.store.get('betty.basic.backoff.NetCoffeeRisk'), failure?.status === 403);
+});
+
+test('Net.Coffee: full outage isolates intelligence while every other panel section runs', async () => {
+  const rt = runtime({ respond: q => q.url.includes('ip.net.coffee') ? null : defaultReply(q) });
+  await rt.run('main()'); assert.equal(rt.done.length, 1);
+  assert.match(rt.done[0].content, /IP 情报暂不可用/); assert.match(rt.done[0].content, /Test Wi-Fi/);
+  assert.match(rt.done[0].content, /系统 DNS/); assert.match(rt.done[0].content, /延迟 DIRECT/);
+  assert.match(rt.done[0].content, /流媒体 · 可达 6\/6/); assert.match(rt.done[0].content, /AI 网站 · 可达 6\/6/);
+  assert.match(rt.done[0].content, /剩余流量/); assert.match(rt.done[0].content, /下载估算/);
+  assert.equal(rt.calls.filter(q => q.url.includes('ip.net.coffee')).length, 1); assert.equal(rt.calls.length, 15);
+});
+
+for (const failStore of [true, 'throw']) test('Net.Coffee: persistent store failure ' + failStore, async () => {
+  const rt = runtime({ failStore }); await rt.run('main()'); assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /Trust 85\/100/);
+  assert.equal(rt.calls.length, 16); assert.equal(rt.logs.length, 0);
+});
+
+test('RISK=0 ignores a warm risk cache, uses only Geo, and caches it without TTL renewal', async () => {
+  const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
+  const off = runtime({ store, clockStart: NOW + 1000, argument: 'RISK=0' }); await off.run('main()');
+  assert.equal(off.calls.length, 16); assert.ok(off.calls.every(q => !/\/api\/ip\/lookup\/|\/api\/iprisk\//.test(q.url)));
+  assert.doesNotMatch(off.done[0].content, /Trust|VPN 是/);
+  const time = JSON.parse(store.get(INTEL)).entries.geo.time;
+  const warm = runtime({ store, clockStart: NOW + 2000, argument: 'RISK=0' }); await warm.run('main()');
+  assert.equal(warm.calls.length, 15); assert.equal(JSON.parse(store.get(INTEL)).entries.geo.time, time);
+});
+
+test('request budget: warm auto refresh is 15, lookup+Geo failure path is at most 17', async () => {
+  const store = new Map(); await runtime({ store }).run('main()');
+  const warm = runtime({ store, clockStart: NOW + 1000 }); await warm.run('main()'); assert.equal(warm.calls.length, 15);
+  const fallback = runtime({ respond: q => /\/api\//.test(q.url) ? null : defaultReply(q) });
+  await fallback.run('main()'); assert.equal(fallback.calls.length, 17); assert.ok(fallback.stats.peak <= 16);
+  assert.ok(fallback.calls.every(q => !q.url.includes('/__down')));
+});
+
+test('HTTP: asynchronous malformed callback settles safely, duplicate completion is ignored', async () => {
+  const broken = runtime();
+  broken.context.$httpClient.get = (q, cb) => broken.context.setTimeout(() => cb(null, { get status() { throw new Error('private error body'); } }, ''), 10);
+  const bad = await broken.run("http('get','https://ip.net.coffee/cdn-cgi/trace','')");
+  assert.equal(bad.ok, false); assert.equal(broken.logs.length, 0);
+  const duplicate = runtime();
+  duplicate.context.$httpClient.get = (q, cb) => duplicate.context.setTimeout(() => {
+    cb(null, { status: 200 }, 'ok');
+    cb(null, { get status() { throw new Error('late callback'); } }, '');
+  }, 10);
+  const good = await duplicate.run("http('get','https://ip.net.coffee/cdn-cgi/trace','')");
+  assert.equal(good.ok, true); assert.equal(good.data, 'ok');
+});
+
+const NON_PUBLIC = [
+  '0.0.0.0', '0.255.255.255', '10.0.0.1', '100.64.0.1', '100.127.255.255', '127.0.0.1',
+  '169.254.1.1', '172.16.0.1', '172.31.255.255', '192.0.0.0', '192.0.0.8', '192.0.0.11', '192.0.0.255',
+  '192.0.2.0', '192.0.2.1', '192.0.2.255', '192.88.99.1', '192.88.99.2', '192.168.1.1',
+  '198.18.0.0', '198.18.0.1', '198.19.255.255', '198.51.100.1', '203.0.113.1', '224.0.0.1', '239.255.255.255', '240.0.0.1', '255.255.255.255',
+  '::', '::1', '2::1', '3::1', '20::1', '300::1', '1fff:ffff::1', '4000::1', 'fe80::1', 'febf::1', 'fc00::1', 'fd00::1', 'ff02::1', '100::1',
+  '::ffff:192.168.1.1', '::ffff:c000:201', '::ffff:8.8.8.8', '::ffff:0808:0808',
+  '2001:db8::1', '2001:0db8:ffff:ffff:ffff:ffff:ffff:ffff', '2001:2::1', '2001:2:0:ffff::1',
+  '2001:10::1', '2001:1f:ffff::1', '2001:20::1', '2001:30::1', '2001:100::1', '2001:1ff:ffff::1',
+  '3fff::1', '3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff', '5f00::1',
+  '008.008.008.008', '0x08080808', '8.8.8.8:443', '2606:4700::1%en0'
+];
+test('public IP: special-purpose ranges and mapped addresses cannot become explicit intelligence queries', async () => {
+  for (const ip of NON_PUBLIC) {
+    const rt = runtime({ respond: () => reply(trace(ip)) });
+    assert.equal(await rt.run('isPublicIP(' + JSON.stringify(ip) + ')'), false, ip);
+    const result = await rt.run("getNetworkIntelligence('')");
+    assert.equal(result.exit.ip, '', ip); assert.equal(rt.calls.length, 1, ip);
+  }
+});
+test('public IP: ordinary addresses and neighboring range boundaries stay accepted', async () => {
+  const rt = runtime();
+  for (const ip of ['1.1.1.1', '8.8.8.8', '100.63.255.255', '100.128.0.0', '172.15.255.255', '172.32.0.0',
+    '192.0.0.9', '192.0.0.10', '192.0.1.1', '192.0.3.1', '192.31.196.1', '192.52.193.1', '192.175.48.1',
+    '198.17.255.255', '198.20.0.0', '198.51.99.255', '198.51.101.0', '203.0.112.255', '203.0.114.0',
+    '2001:4860:4860::8888', '2606:4700:4700::1111', '240e:1::1', '2a00:1450::1', '2001:200::1',
+    '2001:1::1', '2001:1::2', '2001:1::3', '2001:3::1', '2001:4:112::1', '2001:db7::1', '2001:db9::1',
+    '3ffe:ffff::1', '3fff:1000::1', '2002:808:808::1', '2001:0:4136:e378:8000:63bf:3fff:fdd2']) {
+    assert.equal(await rt.run('isPublicIP(' + JSON.stringify(ip) + ')'), true, ip);
+  }
+});
+
+test('release: module, script, README and technical documentation agree on 1.5.0', () => {
+  for (const path of ['../Modules/Betty-Basic-Panel.sgmodule', '../README.md', '../docs/basic-panel.md']) {
+    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /1\.5\.0/);
+  }
+  assert.match(SOURCE, /Version: 1\.5\.0/);
+  assert.doesNotMatch(SOURCE, /countryVote|consensusGeo|function vote/);
+  const intelligence = SOURCE.slice(SOURCE.indexOf('/* ---------- Same-IP'), SOURCE.indexOf('/* ---------- Website'));
+  assert.deepEqual([...new Set([...intelligence.matchAll(/https:\/\/([^/"]+)/g)].map(m => m[1]))], ['ip.net.coffee']);
+});
+
+for (const [endpoint, argument] of [['/cdn-cgi/trace', ''], ['/api/geoip/', 'RISK=0']]) {
+  for (const status of [403, 429, 500]) test('Net.Coffee: ' + endpoint + ' HTTP ' + status + ' fails independently', async () => {
+    const store = new Map();
+    const rt = runtime({ store, argument, respond: q => q.url.includes(endpoint) ? reply('private failure body', status, { 'Retry-After': '120' }) : defaultReply(q) });
+    await rt.run('main()'); assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /IP 情报暂不可用/);
+    assert.equal(JSON.stringify([rt.done, rt.logs, rt.writes]).includes('private failure body'), false);
+    const next = runtime({ store, argument, clockStart: NOW + 1000 }); await next.run("getNetworkIntelligence('')");
+    assert.equal(next.calls.some(q => q.url.includes(endpoint)), status === 500);
+  });
+}
+
+test('cache: reading a risk hit does not extend its original expiry', async () => {
+  const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
+  const time = JSON.parse(store.get(INTEL)).entries.risk.time;
+  const warm = runtime({ store, clockStart: time + 3590000 }); await warm.run("getNetworkIntelligence('')");
+  assert.equal(warm.calls.length, 1); assert.equal(JSON.parse(store.get(INTEL)).entries.risk.time, time);
+  const stale = runtime({ store, clockStart: time + 3600000 }); await stale.run("getNetworkIntelligence('')");
+  assert.equal(stale.calls.length, 2);
 });

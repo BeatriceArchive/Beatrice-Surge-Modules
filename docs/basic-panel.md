@@ -1,6 +1,6 @@
 # 贝蒂的基础面板：技术说明
 
-本文记录 `Betty-Basic-Panel` 的稳定行为与安全边界。版本号与安装入口以 [`Modules/Betty-Basic-Panel.sgmodule`](../Modules/Betty-Basic-Panel.sgmodule) 为准。
+本文记录 `Betty-Basic-Panel` **1.5.0** 的稳定行为与安全边界。版本号与安装入口以 [`Modules/Betty-Basic-Panel.sgmodule`](../Modules/Betty-Basic-Panel.sgmodule) 为准。
 
 ## 设计目标
 
@@ -23,20 +23,27 @@ YS=1&RISK=1
 
 ## 网络身份与信誉
 
-当前数据源：
+唯一第三方 IP 情报服务为 **ip.net.coffee**。使用网站前端实际依赖的公开接口，不宣称它们是供应商承诺长期兼容的官方 API；不解析网页 HTML，不需要 Key、Cookie 或登录。
 
-| 来源 | 用途 | 行为 |
+| GET endpoint | 用途 | 字段 / 行为 |
 | --- | --- | --- |
-| Cloudflare `speed.cloudflare.com/meta` | 新鲜出口 IP、国家、ASN | 每次重新观察；失败时使用独立 fallback |
-| IPWho | 同一出口 IP 的国家、ASN、机构交叉查询 | 结果缓存 1 小时；出口变化立即失效 |
-| ipapi.is | 归属补充；有实际风险字段时才使用 | 兼容匿名基础响应，不把缺失字段猜成 `false` |
-| ProxyCheck v3 | 网络类型、VPN / proxy / Tor、原始 Risk / Confidence | 保留原始语义，不反转成“纯净度” |
+| `/cdn-cgi/trace` | 当前请求出口 | 同站纯文本中的唯一 `ip=` 行；每次重新观察，支持 IPv4 / IPv6 |
+| `/api/ip/lookup/{ip}` | 归属、ASN、类型和信誉 | JSON：`ip`、`countryCode`、`country/region/city`、`asn`、`asOrganization/isp/company_name`、`company_type`、`trust_score`、布尔信号 |
+| `/api/geoip/{ip}` | `RISK=0` 或主查询失败 / 无归属时的同站 Geo 查询 | JSON：`country_code`、`country/region/city/isp`；当前不返回 ASN，也不回显 IP |
 
-Geo / ASN 只合并**同一出口 IP**的有效结果。一致时显示共识，冲突时显示分歧；平票不强行选赢家。机构名称差异单独提示。
+当前出口来自同站 trace，而不是本地 `$network` 地址。显式查询只发送已校验的公网地址。主查询必须回显同一 IP；等价 IPv6 写法先规范化。Geo 结果绑定到请求路径中的 IP；若未来响应增加 IP 字段，也必须一致。Geo 不回显 IP 的能力边界无法通过客户端校验消除。
 
-信誉信号不计算“综合纯净度”，也不对不同供应商的风险值平均、加权或反转。VPN、住宅分配、机房、滥用记录和 ProxyCheck Risk 是不同概念；缺失数据不等于否定结果。
+`RISK=0` 不访问主查询 / 风险接口，不使用风险缓存；Geo 未提供的 ASN 保持未知。默认主查询本身已包含 Geo，因此不重复调用 Geo。所有旧 IP 情报供应商均已退出，Cloudflare 仅保留延迟和手动下载估算用途。
 
-429 / 403 会独立退避，优先遵守 `Retry-After`；单个来源失败不会让整个面板失败。
+Trust 直接展示 `trust_score` 的 0–100 原值，越高越可信；不反转、不平均，也不生成“纯净度”。住宅、机房、VPN、代理、Tor 独立保留是 / 否 / 未知；`company_type` 是分配类型，不能推导住宅或风险高低。面板明确显示单源，不把网站内部聚合字段包装成独立供应商共识。
+
+成功结果使用 v2 缓存，最多 1 小时，不在读取时延长 TTL；过期、未来时间、字段损坏或出口变化时重新查询。每次先观察出口，失败时不展示旧出口或旧信誉。存储异常不阻止刷新，原始响应中的无关字段不保存。
+
+403 / 429 按 endpoint 退避：支持 `Retry-After` 秒数或 HTTP 日期，限制为 1 分钟至 7 天；缺失或无效时保守暂停 24 小时。退避跨出口保留，不循环重试，不跟随重定向。未取得公开额度 / SLA 承诺，也未通过主动制造限流探测阈值。每个请求原生超时 5 秒、回调 watchdog 7 秒；trace 超过 4096 字符或 JSON 超过 65536 字符拒绝解析（这是解析上限，网络缓冲仍受 Surge 原生响应限制）。
+
+Net.Coffee 全站不可用时只显示“IP 情报暂不可用”，本地网络、DNS、延迟、服务入口、订阅和测速缓存继续工作。主查询失败时最多补一次同站 Geo，没有其他供应商 fallback。
+
+公网地址校验依据 IANA 特殊用途注册表，排除私网、CGNAT、回环、链路本地、文档、benchmarking、多播、保留地址及 IPv4-mapped IPv6；IPv4 前导零歧义也被拒绝。IPv6 保留普通 global-unicast 和已明确分配的协议例外，排除 `2001:db8::/32`、`3fff::/20`、benchmarking 及 ORCHID / DET 标识符。校验是用途过滤，不是路由可达性证明。
 
 ## 本地网络状态
 
@@ -84,16 +91,18 @@ $trigger === "button"
 
 ## 请求预算
 
-无缓存自动刷新通常包括：
+| 自动刷新路径 | IP 情报请求 | 通常外部总数 |
+| --- | ---: | ---: |
+| 1.4.1 无缓存 | 4 | 18 |
+| 1.5.0 无缓存默认 | 2（trace + lookup） | 16 |
+| 1.5.0 同出口缓存命中 | 1（trace） | 15 |
+| `RISK=0` 无缓存 | 2（trace + Geo） | 16 |
+| 主查询失败且需要 Geo 补充 | 最多 3 | 最多 17 |
+| 出口发现失败 | 1；或退避期内 0 | 15；或 14 |
 
-- 出口与交叉查询：4
-- 延迟：2
-- 流媒体：6
-- AI：6
+固定其他请求为延迟 2、流媒体 6、AI 6。表中不含动态订阅流量回查、Netflix / YouTube 同站跳转或备用页面、TikTok / Prime 的方法复核；这些路径按需增加请求，不能把通常总数当绝对全场景上限。TikTok / Prime 各最多增加一次 GET。
 
-即约 **18 个外部请求**；归属缓存命中时通常约 15 个。TikTok / Prime 的方法复核按需各增加 1 个，而不是每次固定 HEAD + GET。
-
-Netflix / YouTube 的同站跳转、出口 fallback、订阅流量 fallback 等特殊路径可能增加少量请求。
+单次刷新通常最多 16 个并行外部请求（包括可能的订阅回查），低于 Surge 的 20 请求限制；多个同时运行的脚本仍共享系统资源。测速始终等普通检测完成后才启动，且仅由按钮触发。
 
 ## 隐私与安全边界
 
@@ -119,7 +128,7 @@ Netflix / YouTube 的同站跳转、出口 fallback、订阅流量 fallback 等�
 2. 手动点击 Panel 刷新才产生新测速值和时间。
 3. 切换出口后，Geo / ASN / 风险缓存不会沿用旧 IP。
 4. 网站“可达”不会被描述成账号或版权区“已解锁”。
-5. 单个信誉源失败时其余本地与网络信息仍能正常展示。
+5. Net.Coffee 不可用、返回不匹配 IP 或限流时，其余本地与网络信息仍能正常展示。
 6. TikTok / Prime 需要 GET 复核时，面板显示真实 GET 状态，而不是根据国家猜测。
 7. 断网或测速失败时，最近成功测速值保留但明确标注时间 / 历史状态。
 
@@ -129,5 +138,9 @@ Netflix / YouTube 的同站跳转、出口 fallback、订阅流量 fallback 等�
 - [Surge Panel](https://manual.nssurge.com/tools/panel.html)
 - [Surge HTTP API](https://manual.nssurge.com/tools/http-api.html)
 - [Cloudflare speedtest](https://github.com/cloudflare/speedtest)
+- [Net.Coffee IP 页面](https://ip.net.coffee/ip/) 与其公开 [前端脚本](https://ip.net.coffee/ip/ip-page.js)：同站 trace 和 lookup 请求
+- [Net.Coffee 首页前端](https://ip.net.coffee/home-page.js)：Geo 查询；[IP 页面增强脚本](https://ip.net.coffee/ip/ip-page-v2.js) 标注 Trust 0 高危 / 100 可信
+- [IANA IPv4 特殊用途](https://www.iana.org/assignments/iana-ipv4-special-registry/) / [IPv6 特殊用途](https://www.iana.org/assignments/iana-ipv6-special-registry/)
+- [RFC 7343](https://www.rfc-editor.org/rfc/rfc7343) / [RFC 9374](https://www.rfc-editor.org/rfc/rfc9374)：ORCHID / DET 标识符语义
 
 实现始终以当前脚本和模块文件为最终事实来源；本文只记录稳定契约，不保存一次性端点探测结果或临时调试日志。

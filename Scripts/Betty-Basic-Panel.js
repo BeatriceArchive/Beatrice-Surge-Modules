@@ -1,6 +1,6 @@
 /*
  * 贝蒂的基础面板 - Surge iOS 单 Information Panel
- * Version: 1.4.1
+ * Version: 1.5.0
  *
  * 参数：
  * POLICY = 可选；留空时所有联网检测按 Surge 当前规则执行
@@ -18,15 +18,13 @@
  * 外部 HTTPS 请求清单（服务端必然能看到发起请求的出口 IP）：
  * - www.gstatic.com：DIRECT 延迟；不含其他用户数据。
  * - cp.cloudflare.com：当前规则 / 可选 POLICY 延迟；不含其他用户数据。
- * - speed.cloudflare.com：新鲜出口观测；仅手动刷新下载估算，单响应最多 8 MiB。
- * - ipwho.is：对同一出口 IP 交叉查询；也用作出口发现 fallback。
- * - api.ipify.org：仅出口 IPv4 的最后 fallback；不含其他用户数据。
+ * - ip.net.coffee：唯一第三方 IP 情报源；同站 trace 观测出口，公开 lookup / geoip
+ *   接口查询该出口的归属、ASN、网络类型与原始 Trust；无需 Key，不回退到其他提供商。
+ * - speed.cloudflare.com：仅手动刷新下载估算，单响应最多 8 MiB。
  * - www.netflix.com、www.youtube.com、www.disneyplus.com、open.spotify.com、
  *   www.tiktok.com、www.primevideo.com：流媒体可用性；不含账号、Cookie 或其他用户数据。
  * - chatgpt.com、claude.ai、gemini.google.com、chat.deepseek.com、grok.com、
  *   www.perplexity.ai：AI 服务可达性；不含账号、Cookie 或其他用户数据。
- * - api.ipapi.is、proxycheck.io：仅查询出口 IP；前者兼容匿名基础信息 / 有字段时的风险
- *   信号，后者使用 v3 原始 Risk / Confidence。不收集账号，不接入需要 Key 的增强源。
  * - 当前 Managed Profile 或用户显式提供 SUB_URL 的原始 HTTPS 主机（动态）：仅在本地文本
  *   无法取得流量时请求该 URL；Token 只会发回原主机，不会保存、记录或转发给其他服务。
  */
@@ -58,7 +56,7 @@ const SPEED_BAR_MAX_MBPS = 500;
 const SPEED_BAR_SEGMENTS = 10;
 
 const SPEED_KEY = "betty.basic.speed";
-const INTEL_KEY = "betty.basic.intel.v1";
+const INTEL_KEY = "betty.basic.intel.v2";
 const SOURCE_TTL_MS = 60 * 60 * 1000;
 
 main().catch(function () {
@@ -74,7 +72,7 @@ main().catch(function () {
 
 async function main() {
   const net = getLocalNetwork();
-  // At most 17 external requests in flight; speed starts only after these finish.
+  // At most 16 external requests in flight; speed starts only after these finish.
   const results = await Promise.all([
     getNetworkIntelligence(POLICY), getDNSDelay(),
     latency("https://www.gstatic.com/generate_204", "DIRECT"),
@@ -105,7 +103,7 @@ async function main() {
     "", "🚪 观测出口 · " + (POLICY ? "指定策略" : "当前规则"),
     formatExitLine(exit.country, exit),
     formatOrganizationLine(exit),
-    geoAgreementLine(exit)
+    formatGeoLine(exit)
   ];
   lines.push("", "⚡ 延迟 DIRECT " + fmtMs(results[2]) + " · " +
     (POLICY ? "指定策略 " : "当前规则 ") + fmtMs(results[3]));
@@ -120,7 +118,7 @@ async function main() {
   // A WAF rejection on one site is not an overall network failure.
   let color = exit.ip ? "#30D158" : "#0A84FF";
   if (!exit.ip && results[2] === null && results[3] === null) color = "#FF453A";
-  else if (risk.highRisk || (results[2] === null && results[3] === null)) color = "#FF9F0A";
+  else if (results[2] === null && results[3] === null) color = "#FF9F0A";
   $done({ title: PANEL_TITLE, content: lines.join("\n"), icon: "waveform.path.ecg", "icon-color": color });
 }
 
@@ -236,24 +234,27 @@ function http(method, url, policy, options) {
       }
 
       fn(request, function (error, response, data) {
-        const status = response
-          ? Number(response.status !== undefined ? response.status : response.statusCode)
-          : 0;
-        const headers = response && response.headers ? response.headers : {};
-        let body = "";
+        if (settled) return;
+        try {
+          const status = response
+            ? Number(response.status !== undefined ? response.status : response.statusCode)
+            : 0;
+          const headers = response && response.headers ? response.headers : {};
+          let body = "";
 
-        if (!extra.discardBody) {
-          if (extra.binary === true) body = data || null;
-          else body = typeof data === "string" ? data : "";
-        }
+          if (!extra.discardBody) {
+            if (extra.binary === true) body = data || null;
+            else body = typeof data === "string" ? data : "";
+          }
 
-        finish({
-          ok: !error && !!response,
-          status: Number.isFinite(status) ? status : 0,
-          headers: headers,
-          data: body,
-          ms: Math.max(1, Date.now() - started)
-        });
+          finish({
+            ok: !error && !!response,
+            status: Number.isFinite(status) ? status : 0,
+            headers: headers,
+            data: body,
+            ms: Math.max(1, Date.now() - started)
+          });
+        } catch (_) { failed(); }
       });
     } catch (_) {
       failed();
@@ -284,7 +285,7 @@ function safeJSON(text) {
   }
 }
 
-/* ---------- Same-IP network intelligence ---------- */
+/* ---------- Same-IP Net.Coffee intelligence ---------- */
 
 function isUsableResponse(result) {
   return !!result && result.ok && result.status >= 200 && result.status < 300;
@@ -302,203 +303,134 @@ function unavailableSource(name, reason) {
   return { source: name, ip: "", reason: reason || "不可用" };
 }
 
-async function querySource(name, url, policy, parse) {
+async function querySource(name, url, policy, parse, textMode) {
   const key = "betty.basic.backoff." + name;
   const backoff = readJSON(key);
   if (backoff && finiteInRange(backoff.until, Date.now() + 1, Date.now() + 7 * 86400000)) return unavailableSource(name, "限流 / 暂停");
   const response = await http("get", url, policy, {
     timeout: 5, autoRedirect: false,
-    headers: { "Accept": "application/json", "User-Agent": "Surge-Betty-Panel/1.4" }
+    headers: { "Accept": textMode ? "text/plain" : "application/json",
+      "Cache-Control": "no-cache", "User-Agent": "Surge-Betty-Panel/1.5" }
   });
   if (response.status === 429 || response.status === 403) {
     const retry = getHeader(response.headers, "retry-after");
     const seconds = /^\d+$/.test(retry) ? Number(retry) : (Date.parse(retry) - Date.now()) / 1000;
-    // Quotas are per calling IP, not per queried IP. Changing nodes must not bypass a cooldown.
-    const wait = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 24 * 60 * 60 * 1000;
+    // Endpoint cooldowns survive exit changes. Do not evade a quota by changing nodes.
+    const wait = Number.isFinite(seconds) ? Math.max(0, seconds) * 1000 : 24 * 60 * 60 * 1000;
     writeJSON(key, { until: Date.now() + Math.min(Math.max(wait, 60000), 7 * 86400000) });
     return unavailableSource(name, response.status === 429 ? "限流" : "访问受限");
   }
   if (!isUsableResponse(response)) return unavailableSource(name, response.status ? "服务异常" : "超时 / 网络异常");
+  // Bounds parsing/cache work; Surge's native response limit still bounds wire buffering.
+  if (typeof response.data !== "string" || response.data.length > (textMode ? 4096 : 65536)) return unavailableSource(name, "响应过大");
   try {
-    const data = safeJSON(response.data);
-    const parsed = data && parse(data);
-    return parsed || unavailableSource(name, "数据不足");
+    const data = textMode ? response.data : safeJSON(response.data);
+    return (data && parse(data)) || unavailableSource(name, "数据不足 / IP 不匹配");
   } catch (_) { return unavailableSource(name, "数据异常"); }
-}
-
-function geoRecord(source, ip, country, asn, org) {
-  return { source: source, ip: normalizeIP(ip), country: normalizeCountryCode(country),
-    asn: positiveASN(asn), org: typeof org === "string" ? shortenText(oneLine(org), 100) : "" };
-}
-
-function parseCloudflare(data) {
-  if (!isPublicIP(data.clientIp)) return null;
-  return geoRecord("Cloudflare", data.clientIp, data.country, data.asn, data.asOrganization);
-}
-
-function parseIPWho(data, expected) {
-  if (data.success !== true || !isPublicIP(data.ip) || (expected && normalizeIP(data.ip) !== expected)) return null;
-  const c = data.connection || {};
-  const result = geoRecord("IPWho", data.ip, data.country_code, c.asn, c.org || c.isp);
-  result.countryName = shortenText(oneLine(data.country), 60);
-  return result;
 }
 
 function boolSignal(value) { return typeof value === "boolean" ? value : null; }
 function sourceScore(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null; }
+function intelText(value) { return typeof value === "string" ? shortenText(oneLine(value), 100) : ""; }
 
-function parseIPAPI(data, expected) {
-  if (data.error || !isPublicIP(data.ip) || normalizeIP(data.ip) !== expected) return null;
-  const asn = typeof data.asn === "object" && data.asn ? data.asn : {};
-  const company = typeof data.company === "object" && data.company ? data.company : {};
-  const location = data.location || {};
-  const asnText = typeof data.asn === "string" ? data.asn.match(/^AS(\d+)\b\s*(.*)$/i) : null;
-  const result = geoRecord("IPAPI", data.ip, location.country_code || data.country_code,
-    asn.asn || (asnText && asnText[1]), asn.org || company.name ||
-      (typeof data.company === "string" ? data.company : "") || (asnText && asnText[2]));
-  result.countryName = shortenText(oneLine(location.country || data.country), 60);
+function coffeeGeo(data, ip, countryCode) {
+  return { source: "Net.Coffee", ip: ip, country: normalizeCountryCode(countryCode),
+    countryName: intelText(data.country), region: intelText(data.region), city: intelText(data.city),
+    asn: typeof data.asn === "number" ? positiveASN(data.asn) : null,
+    org: intelText(data.asOrganization) || intelText(data.isp) || intelText(data.company_name),
+    isp: intelText(data.isp), company: intelText(data.company_name) };
+}
+
+function hasGeo(data) {
+  return !!(data.country || data.countryName || data.region || data.city || data.asn || data.org);
+}
+
+function parseNetCoffeeTrace(text) {
+  // This is the same-origin discovery method used by Net.Coffee's public IP page.
+  const lines = text.split(/\r?\n/).filter(function (line) { return line.indexOf("ip=") === 0; });
+  if (lines.length !== 1 || !isPublicIP(lines[0].slice(3))) return null;
+  return { source: "Net.Coffee", ip: normalizeIP(lines[0].slice(3)) };
+}
+
+function parseNetCoffeeGeo(data, expected) {
+  if (!isPublicIP(expected) || data.error || data.is_bogon === true) return null;
+  // The public Geo endpoint does not echo an IP. Bind it to the explicit query path;
+  // if a future response adds an IP, it must match, including equivalent IPv6 forms.
+  if (Object.prototype.hasOwnProperty.call(data, "ip") &&
+      (!isPublicIP(data.ip) || normalizeIP(data.ip) !== expected)) return null;
+  const result = coffeeGeo(data, expected, data.country_code);
+  return hasGeo(result) ? result : null;
+}
+
+function parseNetCoffeeRisk(data, expected) {
+  if (data.error || data.is_bogon === true || !isPublicIP(data.ip) || normalizeIP(data.ip) !== expected) return null;
+  const result = coffeeGeo(data, expected, data.countryCode);
+  result.type = typeof data.company_type === "string" && /^(isp|hosting|business|education|government|banking)$/i.test(data.company_type) ? data.company_type.toLowerCase() : "";
   result.signals = {
+    residential: boolSignal(data.isResidential), hosting: boolSignal(data.is_datacenter),
     vpn: boolSignal(data.is_vpn), proxy: boolSignal(data.is_proxy), tor: boolSignal(data.is_tor),
-    hosting: boolSignal(data.is_datacenter), abuse: boolSignal(data.is_abuser), mobile: boolSignal(data.is_mobile)
+    abuse: boolSignal(data.is_abuser), mobile: boolSignal(data.is_mobile), crawler: boolSignal(data.is_crawler)
   };
-  result.type = typeof company.type === "string" && /^(hosting|isp|business|education|government|banking)$/i.test(company.type) ? company.type.toLowerCase() : "";
-  return result;
+  result.trust = sourceScore(data.trust_score);
+  return hasGeo(result) || hasRisk(result) ? result : null;
 }
 
-function parseProxyCheck(data, expected) {
-  if (data.status !== "ok" && data.status !== "warning") return null;
-  // v3 keys may use another valid spelling of an IPv6 address. Never pick an unrelated IP.
-  const key = Object.keys(data).find(function (value) { return normalizeIP(value) === expected; });
-  const item = key && data[key];
-  if (!item || typeof item !== "object" || !item.detections || !item.network) return null;
-  const d = item.detections, n = item.network;
-  return {
-    source: "ProxyCheck", ip: expected,
-    type: typeof n.type === "string" && /^(Residential|Business|Wireless|Hosting)$/.test(n.type) ? n.type : "",
-    signals: { vpn: boolSignal(d.vpn), proxy: boolSignal(d.proxy), tor: boolSignal(d.tor),
-      hosting: boolSignal(d.hosting), compromised: boolSignal(d.compromised), scraper: boolSignal(d.scraper) },
-    risk: sourceScore(d.risk), confidence: sourceScore(d.confidence)
-  };
+function hasRisk(data) {
+  return !!data && (sourceScore(data.trust) !== null || !!data.type ||
+    !!data.signals && Object.keys(data.signals).some(function (k) { return typeof data.signals[k] === "boolean"; }));
 }
 
-async function getExit(policy) {
-  const cf = await querySource("Cloudflare", "https://speed.cloudflare.com/meta?_=" + Date.now(), policy, parseCloudflare);
-  if (cf.ip) return cf;
-  const who = await querySource("IPWho", "https://ipwho.is/?_=" + Date.now(), policy, function (data) { return parseIPWho(data, ""); });
-  if (who.ip) return who;
-  return querySource("IPify", "https://api.ipify.org?format=json&_=" + Date.now(), policy, function (data) {
-    return isPublicIP(data.ip) ? geoRecord("IPify", data.ip, "", 0, "") : null;
-  });
+function validCachedSource(data, risk, ip) {
+  if (!data || data.source !== "Net.Coffee" || data.ip !== ip) return false;
+  if (!["country", "countryName", "region", "city", "org", "isp", "company"].every(function (k) {
+    return typeof data[k] === "string" && data[k] === intelText(data[k]);
+  }) || normalizeCountryCode(data.country) !== data.country ||
+      (data.asn !== null && (typeof data.asn !== "number" || positiveASN(data.asn) !== data.asn))) return false;
+  if (!risk) return hasGeo(data);
+  if (typeof data.type !== "string" || (data.type && !/^(isp|hosting|business|education|government|banking)$/.test(data.type)) ||
+      (data.trust !== null && sourceScore(data.trust) === null) ||
+      !data.signals || typeof data.signals !== "object" || Array.isArray(data.signals)) return false;
+  return ["residential", "hosting", "vpn", "proxy", "tor", "abuse", "mobile", "crawler"].every(function (k) {
+    return data.signals[k] === null || typeof data.signals[k] === "boolean";
+  }) && (hasGeo(data) || hasRisk(data));
 }
 
 async function getNetworkIntelligence(policy) {
-  // Always observe first, even when cached data is still fresh. Never show an old exit on failure.
-  const observed = await getExit(policy);
+  // Fresh discovery is mandatory. Never reuse a previous exit after discovery fails.
+  const observed = await querySource("NetCoffeeTrace", "https://ip.net.coffee/cdn-cgi/trace?_=" + Date.now(), policy, parseNetCoffeeTrace, true);
   const ip = observed.ip;
-  if (!ip) return { exit: consensusGeo("", []), risk: summarizeReputation([]) };
+  let exit = coffeeGeo({}, ip, ""), risk = unavailableSource("Net.Coffee", observed.reason);
+  if (!ip) return { exit: exit, risk: risk };
   const saved = readJSON(INTEL_KEY);
-  const cache = saved && saved.version === 1 && saved.ip === ip && saved.entries &&
-    typeof saved.entries === "object" && !Array.isArray(saved.entries) ? saved : { version: 1, ip: ip, entries: {} };
-  async function source(name, url, parse) {
-    if (observed.source === name) return observed;
-    const old = cache.entries[name];
-    if (old && validCachedSource(old.data, name, ip) &&
-        Number(old.time) <= Date.now() && Date.now() - Number(old.time) < SOURCE_TTL_MS) return old.data;
-    const value = await querySource(name, url, policy, parse);
-    if (value.ip) cache.entries[name] = { time: Date.now(), data: value };
-    else delete cache.entries[name];
-    return value;
+  const cache = saved && saved.version === 2 && saved.ip === ip && saved.entries &&
+    typeof saved.entries === "object" && !Array.isArray(saved.entries) ? saved : { version: 2, ip: ip, entries: {} };
+  function cached(name) {
+    const entry = cache.entries[name];
+    return entry && typeof entry.time === "number" && entry.time <= Date.now() &&
+      Date.now() - entry.time < SOURCE_TTL_MS && validCachedSource(entry.data, name === "risk", ip) ? entry.data : null;
   }
-  const values = await Promise.all([
-    source("IPWho", "https://ipwho.is/" + encodeURIComponent(ip) + "?fields=ip,success,country,country_code,connection", function (d) { return parseIPWho(d, ip); }),
-    ENABLE_RISK ? source("IPAPI", "https://api.ipapi.is/?q=" + encodeURIComponent(ip), function (d) { return parseIPAPI(d, ip); }) : null,
-    ENABLE_RISK ? source("ProxyCheck", "https://proxycheck.io/v3/" + encodeURIComponent(ip) + "?p=0&tag=0", function (d) { return parseProxyCheck(d, ip); }) : null
-  ]);
+  if (ENABLE_RISK) {
+    const oldRisk = cached("risk");
+    risk = oldRisk || await querySource("NetCoffeeRisk", "https://ip.net.coffee/api/ip/lookup/" + encodeURIComponent(ip), policy,
+      function (data) { return parseNetCoffeeRisk(data, ip); });
+    if (risk.ip) {
+      if (!oldRisk) cache.entries.risk = { time: Date.now(), data: risk };
+      if (hasGeo(risk)) exit = risk;
+    } else delete cache.entries.risk;
+  }
+  if (!hasGeo(exit)) {
+    const oldGeo = cached("geo");
+    exit = oldGeo || await querySource("NetCoffeeGeo", "https://ip.net.coffee/api/geoip/" + encodeURIComponent(ip), policy,
+      function (data) { return parseNetCoffeeGeo(data, ip); });
+    if (exit.ip) {
+      if (!oldGeo) cache.entries.geo = { time: Date.now(), data: exit };
+    } else {
+      delete cache.entries.geo;
+      exit = coffeeGeo({}, ip, "");
+    }
+  }
   writeJSON(INTEL_KEY, cache);
-  const geo = [observed, values[0], values[1]].filter(Boolean);
-  return { exit: consensusGeo(ip, geo), risk: summarizeReputation([values[2], values[1]].filter(Boolean)) };
-}
-
-function validCachedSource(data, name, ip) {
-  if (!data || data.ip !== ip || data.source !== name) return false;
-  if (name !== "ProxyCheck" && (typeof data.country !== "string" ||
-      normalizeCountryCode(data.country) !== data.country || typeof data.org !== "string" ||
-      typeof data.countryName !== "string" || (data.asn !== null && positiveASN(data.asn) !== data.asn))) return false;
-  if (name === "IPAPI" || name === "ProxyCheck") {
-    if (!data.signals || Array.isArray(data.signals) || typeof data.signals !== "object" ||
-        !Object.keys(data.signals).every(function (k) { return data.signals[k] === null || typeof data.signals[k] === "boolean"; })) return false;
-    if (typeof data.type !== "string") return false;
-  }
-  if (name === "ProxyCheck" && ((data.risk !== null && sourceScore(data.risk) === null) ||
-      (data.confidence !== null && sourceScore(data.confidence) === null))) return false;
-  return true;
-}
-
-function vote(values) {
-  const counts = Object.create(null);
-  values.filter(Boolean).forEach(function (v) { counts[v] = (counts[v] || 0) + 1; });
-  const ranked = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
-  const first = ranked[0] || "";
-  const tie = ranked.length > 1 && counts[first] === counts[ranked[1]];
-  return { value: tie ? "" : first, count: first ? counts[first] : 0, total: values.filter(Boolean).length, disagreement: ranked.length > 1 };
-}
-
-function consensusGeo(ip, sources) {
-  const seen = {};
-  const valid = sources.filter(function (s) {
-    if (!s || !ip || normalizeIP(s.ip) !== ip || seen[s.source]) return false;
-    seen[s.source] = true; return true;
-  });
-  // Anonymous IPAPI may give a country name only. Match names exactly against an
-  // independently returned name/code pair; never guess an unfamiliar country's ISO code.
-  let unmappedCountry = false;
-  const countries = valid.map(function (s) {
-    if (s.country) return s.country;
-    if (!s.countryName) return "";
-    const peer = valid.find(function (p) { return p.country && p.countryName && p.countryName.toLowerCase() === s.countryName.toLowerCase(); });
-    if (peer) return peer.country;
-    unmappedCountry = true; return "";
-  });
-  const countryVote = vote(countries), asnVote = vote(valid.map(function (s) { return s.asn ? String(s.asn) : ""; }));
-  const country = normalizeCountryCode(countryVote.value);
-  const asn = positiveASN(asnVote.value);
-  const orgs = valid.filter(function (s) { return s.asn === asn && s.org; });
-  const orgVote = vote(orgs.map(function (s) { return shortenISP(s.org).toLowerCase(); }));
-  const selected = orgs.find(function (s) { return shortenISP(s.org).toLowerCase() === orgVote.value; }) || orgs[0];
-  const org = selected ? selected.org : "";
-  if (!valid.some(function (s) { return s.country || s.asn || s.org; }) && ip) {
-    try {
-      if (typeof $utils === "object" && $utils) {
-        const local = geoRecord("Surge DB", ip, $utils.geoip(ip), $utils.ipasn(ip), $utils.ipaso(ip));
-        return Object.assign(local, { localOnly: true, countryVote: countryVote, asnVote: asnVote, orgDisagreement: false });
-      }
-    } catch (_) {}
-  }
-  return { ip: ip, country: country, asn: asn, org: org, countryVote: countryVote, asnVote: asnVote,
-    orgDisagreement: orgVote.disagreement, localOnly: false, unmappedCountry: unmappedCountry };
-}
-
-function signalLabel(source) {
-  const names = { vpn: "VPN", proxy: "代理", tor: "Tor", hosting: "机房", abuse: "滥用记录", mobile: "移动网络", compromised: "失陷标记", scraper: "爬虫标记" };
-  const signals = source.signals || {};
-  const labels = Object.keys(names).filter(function (k) { return signals[k] === true; }).map(function (k) { return names[k]; });
-  const types = { Hosting: "机房分配", Residential: "住宅分配", Business: "商业分配", Wireless: "无线分配", isp: "ISP", business: "商业分配", hosting: "机房" };
-  if (types[source.type] && !(source.type === "Hosting" && signals.hosting === true) && labels.indexOf(types[source.type]) < 0) labels.unshift(types[source.type]);
-  return labels.join(" / ") || (Object.keys(signals).some(function (k) { return signals[k] === false; }) ? "未标记已查风险" : "无风险字段");
-}
-
-function summarizeReputation(sources) {
-  const valid = sources.filter(function (s) { return s && s.ip && s.signals && (Object.keys(s.signals).some(function (k) { return typeof s.signals[k] === "boolean"; }) || (s.source === "ProxyCheck" && (s.risk !== null || !!s.type))); });
-  const pc = valid.find(function (s) { return s.source === "ProxyCheck"; });
-  let comparable = 0, conflicts = 0;
-  if (valid.length >= 2) Object.keys(valid[0].signals).forEach(function (key) {
-    const a = valid[0].signals[key], b = valid[1].signals[key];
-    if (typeof a === "boolean" && typeof b === "boolean") { comparable++; if (a !== b) conflicts++; }
-  });
-  return { sources: sources, available: valid.length > 0, count: valid.length,
-    comparable: comparable, conflicts: conflicts,
-    risk: pc ? pc.risk : null, confidence: pc ? pc.confidence : null,
-    highRisk: !!pc && pc.risk !== null && pc.risk >= 76 && pc.confidence !== null && pc.confidence >= 90 };
+  return { exit: exit, risk: risk };
 }
 
 /* ---------- Website evidence, not account/playback promises ---------- */
@@ -727,7 +659,7 @@ function downloadSpeedBlock(policy, blockBytes, budget) {
       url: "https://speed.cloudflare.com/__down?bytes=" + blockBytes + "&_=" + started + "-" + budget.requests,
       timeout: Math.min(SPEED_REQUEST_TIMEOUT, Math.max(0.1, remaining / 1000)),
       "binary-mode": true, "auto-cookie": false, "auto-redirect": false,
-      headers: { "User-Agent": "Surge-Betty-Panel/1.4", "Accept": "application/octet-stream", "Accept-Encoding": "identity", "Cache-Control": "no-store" }
+      headers: { "User-Agent": "Surge-Betty-Panel/1.5", "Accept": "application/octet-stream", "Accept-Encoding": "identity", "Cache-Control": "no-store" }
     };
     if (clean(policy)) request.policy = clean(policy);
     try {
@@ -1242,7 +1174,7 @@ function isCGNAT(ip) {
 
 function parseIPv4(ip) {
   const value = clean(ip);
-  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return null;
+  if (!/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(value)) return null;
   const p = value.split(".").map(Number);
   return p.every(function (n) { return n >= 0 && n <= 255; }) ? p : null;
 }
@@ -1280,8 +1212,31 @@ function isPublicIP(value) {
   if (typeof value !== "string") return false;
   const ip = normalizeIP(value), v4 = parseIPv4(ip);
   if (!ip) return false;
-  if (v4) return !isPrivateIPv4(ip) && !isCGNAT(ip) && v4[0] !== 0 && v4[0] !== 127 && v4[0] < 224 && !(v4[0] === 169 && v4[1] === 254);
-  return /^[23]/.test(ip); // Global unicast 2000::/3; excludes local/link-local/mapped addresses.
+  // IANA special-purpose registries: reject non-global source ranges, with the
+  // globally reachable PCP/TURN anycast exceptions inside 192.0.0.0/24.
+  if (v4) {
+    const a = v4[0], b = v4[1], c = v4[2], d = v4[3];
+    return !isPrivateIPv4(ip) && !isCGNAT(ip) && a !== 0 && a !== 127 && a < 224 &&
+      !(a === 169 && b === 254) &&
+      !(a === 192 && b === 0 && c === 0 && d !== 9 && d !== 10) &&
+      !(a === 192 && b === 0 && c === 2) &&
+      !(a === 192 && b === 88 && c === 99) &&
+      !(a === 198 && (b === 18 || b === 19)) &&
+      !(a === 198 && b === 51 && c === 100) &&
+      !(a === 203 && b === 0 && c === 113);
+  }
+  // Global unicast only; mapped IPv4 is not an IPv6 wire-source address.
+  const words = ip.split(":").map(function (part) { return parseInt(part || "0", 16); });
+  if (words[0] < 0x2000 || words[0] > 0x3fff) return false;
+  if (words[0] === 0x3fff && words[1] < 0x1000) return false; // RFC 9637 documentation /20
+  if (words[0] !== 0x2001) return true;
+  if (words[1] === 0xdb8) return false; // RFC 3849 documentation /32
+  // 2001::/23 protocol assignments are not generally global. Retain assigned
+  // Teredo, AMT, AS112 and service anycast exceptions. ORCHID/DETs are identifiers,
+  // not public exit locators (RFC 7343/9374), even if usable by overlay APIs.
+  if (words[1] >= 0x200) return true;
+  return words[1] === 0 || words[1] === 3 ||
+    (words[1] === 4 && words[2] === 0x112) || /^2001:1::[123]$/.test(ip);
 }
 
 function formatIPv6(local, exitIP) {
@@ -1380,26 +1335,26 @@ function appendServiceLines(lines, title, items, showFailures) {
   }).join(" · "));
 }
 
-function geoAgreementLine(exit) {
-  if (exit.localOnly) return "仅 Surge 本地库 · 未交叉验证";
-  const g = exit.countryVote, a = exit.asnVote;
-  const geo = !g.total ? "Geo 数据不足" : g.total === 1 ? "Geo 单源" : "Geo " + g.count + "/" + g.total + (g.disagreement ? " 有分歧" : " 一致");
-  const asn = !a.total ? "ASN 未知" : a.total === 1 ? "ASN 单源" : "ASN " + a.count + "/" + a.total + (a.disagreement ? " 有分歧" : " 一致");
-  return geo + " · " + asn + (exit.unmappedCountry ? "\n部分国家名称待核对" : "") + (exit.orgDisagreement ? "\n机构名称有差异" : "");
+function formatGeoLine(exit) {
+  if (!exit.ip || !hasGeo(exit)) return "IP 情报暂不可用 · Net.Coffee";
+  const place = [exit.region, exit.city].filter(Boolean).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(" / ");
+  return "Net.Coffee · 单源" + (place ? " · " + shortenText(place, 36) : "");
 }
 
+function signalState(value) { return value === true ? "是" : value === false ? "否" : "未知"; }
+
 function appendRiskLines(lines, risk) {
-  lines.push("🛡 IP 信誉" + (ENABLE_RISK ? "" : " · 已关闭"));
+  lines.push("🛡 IP 信誉" + (ENABLE_RISK ? " · Net.Coffee" : " · 已关闭"));
   if (!ENABLE_RISK) return;
-  if (!risk.sources.length) { lines.push("数据不足"); return; }
-  risk.sources.forEach(function (s) {
-    lines.push(s.source + "：" + (s.ip ? signalLabel(s) : s.reason));
-  });
-  if (risk.risk !== null) lines.push("PC Risk " + risk.risk + "/100" +
-    (risk.confidence !== null ? " · 检测置信度 " + risk.confidence : ""));
-  if (risk.conflicts) lines.push("信号存在分歧 · " + risk.conflicts + "/" + risk.comparable + " 项不同");
-  else if (risk.comparable) lines.push("可比信号一致 2/2 源 · " + risk.comparable + " 项");
-  else lines.push(risk.count ? "单源 / 无可比信号 · 未交叉确认" : "风险数据不足");
+  if (!risk.ip || !hasRisk(risk)) { lines.push("暂不可用" + (risk.reason ? " · " + risk.reason : "")); return; }
+  const s = risk.signals;
+  lines.push("Trust " + (risk.trust === null ? "未知" : risk.trust + "/100") + " · 越高越可信");
+  const types = { isp: "ISP", hosting: "托管", business: "商业", education: "教育", government: "政府", banking: "银行" };
+  lines.push((types[risk.type] || "类型未知") + " · 住宅 " + signalState(s.residential) + " · 机房 " + signalState(s.hosting));
+  lines.push("VPN " + signalState(s.vpn) + " · 代理 " + signalState(s.proxy) + " · Tor " + signalState(s.tor));
+  const extra = [["abuse", "滥用记录"], ["mobile", "移动网络"], ["crawler", "爬虫"]]
+    .filter(function (pair) { return s[pair[0]] === true; }).map(function (pair) { return pair[1]; });
+  if (extra.length) lines.push(extra.join(" / "));
 }
 
 function displayIP(ip) {
