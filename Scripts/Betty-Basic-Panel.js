@@ -1,6 +1,6 @@
 /*
  * 贝蒂的基础面板 - Surge iOS 单 Information Panel
- * Version: 1.5.2
+ * Version: 1.5.3
  *
  * 参数：
  * POLICY = 可选；留空时所有联网检测按 Surge 当前规则执行
@@ -11,7 +11,7 @@
  * - 无 MITM、Rewrite、Rule、eval、Function()、远程代码或第三方统计服务。
  * - 所有 $httpClient 请求均关闭 auto-cookie，不发送 Cookie、Authorization 或 Profile 正文。
  * - 仅在 $trigger === "button" 时使用 $httpClient 快速估算下载速度；自动刷新只读
- *   本地测速缓存。顺序放大样本，全流程 8 秒、64 MiB 请求体积，最多 2 个并行请求。
+ *   本地测速缓存。固定多流批次，全流程 8 秒、64 MiB 请求体积，最多 3 个并行请求。
  * - 当前 Profile 只通过官方 /v1/profiles/current?sensitive=0 读取脱敏文本；不读取敏感版本，
  *   不保存 Profile、Managed URL、订阅 Token 或 subscription-userinfo 原始 Header。
  *
@@ -45,8 +45,10 @@ const SPEED_TOTAL_TIMEOUT_MS = 8000;
 const SPEED_WARMUP_BYTES = 32 * 1024;
 // Surge 实机曾验证 60/48/32 KiB 可避开较小的 Response Body 上限；仅作同源安全降级。
 const SPEED_SAFE_BLOCK_SIZES = [60 * 1024, 48 * 1024, 32 * 1024];
-const SPEED_SAMPLE_SIZES = [512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024, 16 * 1024 * 1024];
-const SPEED_WORKER_COUNT = 2;
+const SPEED_SAMPLE_SIZES = [512 * 1024, 1 * 1024 * 1024, 2 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024, 16 * 1024 * 1024];
+const SPEED_STREAM_COUNT = 3;
+const SPEED_MIN_BATCH_MS = 700;
+const SPEED_TARGET_BATCH_MS = 1500;
 const SPEED_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const SPEED_MAX_REQUESTS = 16;
 const SPEED_MIN_SUCCESS_BYTES = 128 * 1024;
@@ -587,54 +589,63 @@ async function runDownloadSpeedTest(policy) {
 async function adaptiveDownload(policy, budget) {
   const warmup = await downloadSpeedBlock(policy, SPEED_WARMUP_BYTES, budget);
   if (budget.closed || warmup.reason === "http") return null;
-  // Warmup is excluded from the rate. Its duration only guides sizing/admission;
-  // never subtract RTT, TLS or callback overhead from measured elapsed time.
-  const latency = warmup.ok ? warmup.elapsed : 0;
-  const target = Math.max(1000, latency * 3);
-  let sample = null;
-  for (let i = 0; i < SPEED_SAMPLE_SIZES.length; i++) {
-    const size = SPEED_SAMPLE_SIZES[i];
-    if (sample) {
-      const estimate = latency + Math.max(1, sample.elapsed - latency) * size / sample.bytes;
-      if (!canScheduleSpeed(budget, size, 1, estimate)) break;
-    }
-    const next = await downloadSpeedBlock(policy, size, budget);
-    if (budget.closed) return budget.best;
-    if (!next.ok) {
-      if (budget.best) return budget.best;
-      // A working block may be too brief on its own. If only the larger body is
-      // rejected/truncated, accumulate that known-good size instead of discarding it.
-      if (sample && (next.reason === "body_limit" || next.reason === "body_mismatch")) {
-        return smallDownload(policy, budget, sample);
-      }
-      if (i === 0 && (next.reason === "body_limit" || next.reason === "body_mismatch" ||
-          (warmup.ok && (next.reason === "transport" || next.reason === "timeout")))) {
-        return smallDownload(policy, budget);
-      }
-      return null;
-    }
-    sample = next;
-    // One complete large, sufficiently long response is a useful quick estimate.
-    // Save it immediately, before optional larger requests or confirmation.
-    rememberSpeedSample(next.bytes, next.elapsed, budget, "快速采样", 512 * 1024);
-    if (next.elapsed >= target) break;
+  let probe = await downloadSpeedBlock(policy, 512 * 1024, budget), previous = null;
+  if (budget.closed) return budget.best;
+  if (!probe.ok) {
+    if (probe.reason === "body_limit" || probe.reason === "body_mismatch" ||
+        (warmup.ok && (probe.reason === "transport" || probe.reason === "timeout"))) return smallDownload(policy, budget);
+    return null;
   }
-  if (!sample || budget.closed) return budget.best;
-
-  // Confirm a long sample sequentially. A short final ramp sample may use one
-  // fixed pair to amortize RTT; there is no replenishing worker pool/window.
-  const count = sample.elapsed >= target ? 1 : SPEED_WORKER_COUNT;
-  if (!canScheduleSpeed(budget, sample.bytes, count, sample.elapsed * count)) return budget.best;
-  if (count === 1) {
-    const repeated = await downloadSpeedBlock(policy, sample.bytes, budget);
-    if (repeated.ok && !budget.closed) {
-      rememberSpeedSample(sample.bytes + repeated.bytes, sample.elapsed + repeated.elapsed,
-        budget, "顺序采样", 512 * 1024);
+  rememberSpeedSample(probe.bytes, probe.elapsed, budget, "单流估算", 512 * 1024);
+  // At most one larger probe; reserve time for the actual aggregate measurement.
+  if (probe.elapsed < 800 && canScheduleSpeed(budget, 2 * 1024 * 1024, 1, probe.elapsed * 4) &&
+      budget.deadline - Date.now() > probe.elapsed * 4 + 3000) {
+    const larger = await downloadSpeedBlock(policy, 2 * 1024 * 1024, budget);
+    if (budget.closed) return budget.best;
+    if (!larger.ok) {
+      if (!budget.best && (larger.reason === "body_limit" || larger.reason === "body_mismatch")) return smallDownload(policy, budget, probe);
+      return budget.best;
     }
-  } else {
-    await measureDownload(policy, sample.bytes, count, budget);
+    previous = probe; probe = larger;
+    rememberSpeedSample(probe.bytes, probe.elapsed, budget, "单流估算", 512 * 1024);
+  }
+  const block = chooseSpeedBlock(probe, previous, warmup, budget);
+  if (!block) return budget.best;
+  const batch = await measureDownload(policy, block, budget);
+  if (!budget.closed && !budget.best && batch.started > 0 && batch.bodyFailures === batch.started) {
+    return smallDownload(policy, budget, probe);
+  }
+  if (budget.closed || batch.failed || batch.successful !== batch.started || batch.elapsed >= SPEED_MIN_BATCH_MS) return budget.best;
+  // A short complete batch may be enlarged ONCE. No replenishing workers.
+  const wanted = block * SPEED_TARGET_BATCH_MS / Math.max(1, batch.elapsed);
+  let next = SPEED_SAMPLE_SIZES.find(function (size) { return size > block && size >= wanted; });
+  if (!next) next = SPEED_SAMPLE_SIZES[SPEED_SAMPLE_SIZES.length - 1];
+  if (next > block && canScheduleSpeed(budget, next, SPEED_STREAM_COUNT, batch.elapsed * next / block)) {
+    await measureDownload(policy, next, budget);
   }
   return budget.best;
+}
+
+function chooseSpeedBlock(probe, previous, warmup, budget) {
+  // Setup/transfer separation is ONLY a sizing estimate. Displayed throughput
+  // always includes the full wall-clock interval, without subtracting anything.
+  let perByte, setup;
+  if (previous && probe.elapsed - previous.elapsed > 5) {
+    perByte = (probe.elapsed - previous.elapsed) / (probe.bytes - previous.bytes);
+    setup = Math.max(0, probe.elapsed - probe.bytes * perByte);
+  } else if (warmup.ok && probe.elapsed - warmup.elapsed > 5) {
+    perByte = (probe.elapsed - warmup.elapsed) / probe.bytes; setup = warmup.elapsed;
+  } else {
+    perByte = probe.elapsed / probe.bytes; setup = 0;
+  }
+  const wanted = Math.max(512 * 1024, (SPEED_TARGET_BATCH_MS - setup) / perByte / SPEED_STREAM_COUNT);
+  let index = SPEED_SAMPLE_SIZES.findIndex(function (size) { return size >= wanted; });
+  if (index < 0) index = SPEED_SAMPLE_SIZES.length - 1;
+  for (; index >= 0; index--) {
+    const size = SPEED_SAMPLE_SIZES[index], estimate = setup + size * SPEED_STREAM_COUNT * perByte;
+    if ((estimate <= 2500 || index === 0) && canScheduleSpeed(budget, size, SPEED_STREAM_COUNT, estimate)) return size;
+  }
+  return 0;
 }
 
 function canScheduleSpeed(budget, bytes, count, estimateMS) {
@@ -645,32 +656,53 @@ function canScheduleSpeed(budget, bytes, count, estimateMS) {
 }
 
 function rememberSpeedSample(bytes, elapsed, budget, mode, minimumBytes) {
-  if (budget.closed || bytes < minimumBytes || elapsed < SPEED_MIN_MEASURE_MS) return false;
+  if (budget.closed || bytes < minimumBytes || elapsed < SPEED_MIN_MEASURE_MS ||
+      (budget.best && budget.best.mode === "多流采样")) return false;
   const mbps = bytes * 8 / elapsed / 1000;
   budget.best = { mbps: mbps, mbPerSecond: mbps / 8, time: Date.now(), mode: mode,
     requestedBytes: budget.bytes, elapsed: elapsed };
   return true;
 }
 
-async function measureDownload(policy, block, count, budget) {
-  const started = Date.now();
-  // Scheduling ends as soon as this fixed batch is issued. Drain until all
-  // callbacks finish or the global watchdog closes the budget; no nominal stop
-  // discards an in-flight success. The denominator includes the LAST callback.
+function summarizeSpeedBatch(state) {
+  // A quorum describes accepted complete bodies, not failures among in-flight
+  // requests: 2/2, 2/3 or 3/4. Duration qualification is separate from this math.
+  if (state.successful < 2 || state.successful * 3 < state.started * 2 || state.elapsed <= 0) return null;
+  const mbps = state.bytes * 8 / state.elapsed / 1000;
+  return { mbps: mbps, mbPerSecond: mbps / 8, time: state.time, mode: "多流采样",
+    elapsed: state.elapsed, streams: state.successful, started: state.started };
+}
+
+async function measureDownload(policy, block, budget) {
+  const began = Date.now();
+  const state = { started: 0, completed: 0, successful: 0, failed: 0, bodyFailures: 0,
+    bytes: 0, elapsed: 0, time: began };
+  budget.batch = state;
+  // All admission checks precede the fixed batch. No other stage runs until it
+  // drains or the global watchdog closes the budget. No extra request timers.
+  if (!canScheduleSpeed(budget, block, SPEED_STREAM_COUNT, 0)) return state;
+  state.started = SPEED_STREAM_COUNT;
   const pending = [];
-  for (let i = 0; i < Math.min(count, SPEED_WORKER_COUNT); i++) {
+  for (let i = 0; i < SPEED_STREAM_COUNT; i++) {
     pending.push(downloadSpeedBlock(policy, block, budget).then(function (response) {
-      // Even if the other callback is lost, a qualified complete large response
-      // remains useful. Do not replace an existing ramp result with a partial pair.
-      if (response.ok && !budget.best) rememberSpeedSample(response.bytes, response.elapsed, budget, "快速采样", 512 * 1024);
-      return response;
+      if (budget.closed) return;
+      state.completed++;
+      if (!response.ok) {
+        state.failed++;
+        if (response.reason === "body_limit" || response.reason === "body_mismatch") state.bodyFailures++;
+        return;
+      }
+      state.successful++; state.bytes += response.bytes;
+      state.elapsed = Date.now() - began; state.time = Date.now();
+      if (!budget.best) rememberSpeedSample(response.bytes, response.elapsed, budget, "单流估算", 512 * 1024);
+      const aggregate = summarizeSpeedBatch(state);
+      if (aggregate && aggregate.elapsed >= SPEED_MIN_BATCH_MS) {
+        budget.best = Object.assign(aggregate, { requestedBytes: budget.bytes });
+      }
     }));
   }
-  const responses = await Promise.all(pending);
-  if (budget.closed || !responses.length || responses.some(function (response) { return !response.ok; })) return null;
-  const bytes = responses.reduce(function (sum, response) { return sum + response.bytes; }, 0);
-  rememberSpeedSample(bytes, Date.now() - started, budget, "双样本采样", 512 * 1024);
-  return budget.best;
+  await Promise.all(pending);
+  return state;
 }
 
 async function smallDownload(policy, budget, sample) {
@@ -760,14 +792,23 @@ function binaryLength(data) {
 function readSpeedResult() {
   const saved = readJSON(SPEED_KEY);
   if (!saved || !finiteInRange(saved.mbps, 0.001, 100000) || !finiteInRange(saved.time, 1, Date.now())) return null;
+  // Older samples have weaker/unknown measurement semantics; never promote them
+  // to a new aggregate result. Keep their value only as labelled history.
+  let mode = "历史采样";
+  if (saved.version === 2 && finiteInRange(saved.elapsed, SPEED_MIN_MEASURE_MS, SPEED_TOTAL_TIMEOUT_MS)) {
+    if (saved.mode === "单流估算" || saved.mode === "小响应降级") mode = saved.mode;
+    if (saved.mode === "多流采样" && saved.elapsed >= SPEED_MIN_BATCH_MS &&
+        saved.started === SPEED_STREAM_COUNT && Number.isInteger(saved.streams) &&
+        saved.streams >= 2 && saved.streams <= saved.started) mode = saved.mode;
+  }
   return { mbps: Number(saved.mbps), mbPerSecond: Number(saved.mbps) / 8, time: Number(saved.time),
-    ip: normalizeIP(saved.ip), mode: ["低速采样", "中速采样", "高速采样", "小响应降级", "快速采样", "顺序采样", "双样本采样"].indexOf(saved.mode) >= 0 ? saved.mode : "" };
+    ip: normalizeIP(saved.ip), mode: mode, streams: mode === "多流采样" ? saved.streams : 0, started: saved.started };
 }
 
 function saveSpeedResult(result) {
   if (!result || !finiteInRange(result.mbps, 0.001, 100000) || !finiteInRange(result.time, 1, Date.now())) return false;
-  return writeJSON(SPEED_KEY, { mbps: result.mbps, mbPerSecond: result.mbps / 8, time: result.time,
-    ip: normalizeIP(result.ip), mode: result.mode });
+  return writeJSON(SPEED_KEY, { version: 2, mbps: result.mbps, mbPerSecond: result.mbps / 8, time: result.time,
+    ip: normalizeIP(result.ip), mode: result.mode, elapsed: result.elapsed, streams: result.streams, started: result.started });
 }
 
 /* ---------- Current Profile subscription usage ---------- */
@@ -1317,23 +1358,30 @@ function formatIPv6(local, exitIP) {
 function appendSpeedLines(lines, speed) {
   const hasValue = speed && finiteInRange(speed.mbps, 0.001, 100000);
   if (hasValue && speed.state === "fresh") {
-    lines.push("测速 " + formatFixed(speed.mbps, 1) + " Mbps · " + formatFixed(speed.mbps / 8, 1) + " MB/s");
-    lines.push(speedResultBar(speed.mbps) +
-      (speed.mode === "快速采样" || speed.mode === "小响应降级" ? " · " + speed.mode : ""));
+    const aggregate = speed.mode === "多流采样";
+    lines.push((aggregate ? "测速 " : speed.mode === "小响应降级" ? "单流 " : "单流估算 ") +
+      formatFixed(speed.mbps, 1) + " Mbps · " + formatFixed(speed.mbps / 8, 1) + " MB/s");
+    if (aggregate) lines.push(speedResultBar(speed.mbps) + " · " + speedModeLabel(speed));
+    else if (speed.mode === "小响应降级") lines.push("小响应降级");
     return;
   }
   if (speed && (speed.state === "failed" || speed.state === "cooldown")) {
     let text = speed.state === "cooldown" ? "测速冷却中" : "测速失败 · " + speedFailureLabel(speed.failure);
     if (hasValue) text += " · 上次 " + formatFixed(speed.mbps, 1) + " Mbps（" + speedTimeLabel(speed.time) +
-      (speed.otherExit ? speed.exitUnknown ? " · 出口未确认" : " · 旧出口" : " · 同出口") + "）";
+      (speed.otherExit ? speed.exitUnknown ? " · 出口未确认" : " · 旧出口" : " · 同出口") + " · " + speedModeLabel(speed) + "）";
     lines.push(text);
     return;
   }
   if (hasValue && !speed.otherExit) {
-    lines.push("测速缓存 " + formatFixed(speed.mbps, 1) + " Mbps · " + speedTimeLabel(speed.time));
+    lines.push("测速缓存 " + formatFixed(speed.mbps, 1) + " Mbps · " + speedTimeLabel(speed.time) + " · " + speedModeLabel(speed));
   } else {
     lines.push(hasValue ? "测速暂无当前出口结果" : "测速未测 · 点刷新");
   }
+}
+
+function speedModeLabel(speed) {
+  const mode = speed.mode || "历史采样";
+  return mode + (mode === "多流采样" && speed.streams < speed.started ? " " + speed.streams + "/" + speed.started : "");
 }
 
 function speedFailureLabel(failure) {
