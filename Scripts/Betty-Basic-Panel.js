@@ -1,6 +1,6 @@
 /*
  * 贝蒂的基础面板 - Surge iOS 单 Information Panel
- * Version: 1.5.1
+ * Version: 1.5.2
  *
  * 参数：
  * POLICY = 可选；留空时所有联网检测按 Surge 当前规则执行
@@ -11,7 +11,7 @@
  * - 无 MITM、Rewrite、Rule、eval、Function()、远程代码或第三方统计服务。
  * - 所有 $httpClient 请求均关闭 auto-cookie，不发送 Cookie、Authorization 或 Profile 正文。
  * - 仅在 $trigger === "button" 时使用 $httpClient 快速估算下载速度；自动刷新只读
- *   本地测速缓存。自适应采样，全流程 8 秒、128 MiB 请求体积、4 workers 上限。
+ *   本地测速缓存。顺序放大样本，全流程 8 秒、64 MiB 请求体积，最多 2 个并行请求。
  * - 当前 Profile 只通过官方 /v1/profiles/current?sensitive=0 读取脱敏文本；不读取敏感版本，
  *   不保存 Profile、Managed URL、订阅 Token 或 subscription-userinfo 原始 Header。
  *
@@ -20,7 +20,7 @@
  * - cp.cloudflare.com：当前规则 / 可选 POLICY 延迟；不含其他用户数据。
  * - ip.net.coffee：唯一第三方 IP 情报源；同站 trace 观测出口，公开 lookup / geoip
  *   接口查询该出口的归属、ASN、网络类型与原始 Trust；无需 Key，不回退到其他提供商。
- * - speed.cloudflare.com：仅手动刷新下载估算，单响应最多 8 MiB。
+ * - speed.cloudflare.com：仅手动刷新下载估算，单响应最多 16 MiB。
  * - www.netflix.com、www.youtube.com、www.disneyplus.com、open.spotify.com、
  *   www.tiktok.com、www.primevideo.com：流媒体可用性；不含账号、Cookie 或其他用户数据。
  * - chatgpt.com、claude.ai、gemini.google.com、chat.deepseek.com、grok.com、
@@ -45,13 +45,12 @@ const SPEED_TOTAL_TIMEOUT_MS = 8000;
 const SPEED_WARMUP_BYTES = 32 * 1024;
 // Surge 实机曾验证 60/48/32 KiB 可避开较小的 Response Body 上限；仅作同源安全降级。
 const SPEED_SAFE_BLOCK_SIZES = [60 * 1024, 48 * 1024, 32 * 1024];
-const SPEED_WORKER_COUNT = 4;
-const SPEED_MAX_TOTAL_BYTES = 128 * 1024 * 1024;
-const SPEED_MIN_SUCCESS_RATIO = 0.5;
-const SPEED_MIN_SUCCESS_SAMPLES = 2;
+const SPEED_SAMPLE_SIZES = [512 * 1024, 2 * 1024 * 1024, 8 * 1024 * 1024, 16 * 1024 * 1024];
+const SPEED_WORKER_COUNT = 2;
+const SPEED_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+const SPEED_MAX_REQUESTS = 16;
 const SPEED_MIN_SUCCESS_BYTES = 128 * 1024;
-const SPEED_MIN_SAMPLE_MS = 5;
-const SPEED_MIN_MEASURE_MS = 500;
+const SPEED_MIN_MEASURE_MS = 100;
 const SPEED_BAR_MAX_MBPS = 500;
 const SPEED_BAR_SEGMENTS = 10;
 
@@ -567,15 +566,15 @@ async function getSpeedForThisRun(policy, ip) {
 
 async function runDownloadSpeedTest(policy) {
   const budget = { bytes: 0, requests: 0, closed: false, deadline: Date.now() + SPEED_TOTAL_TIMEOUT_MS,
-    best: null, partial: null, failure: null };
-  // Only one overall watchdog plus one per measurement stage. Per-block timers can
-  // exceed Surge's 64 pending timer limit on JSC (which may have no clearTimeout).
+    best: null, failure: null };
+  // A single watchdog also covers a missing native callback. No per-block timers
+  // or cancellation APIs: JSC may have no clearTimeout and allows 64 pending timers.
   return new Promise(function (resolve) {
     let settled = false;
     function finish(result, reason) {
       if (settled) return;
       settled = true; budget.closed = true;
-      const measurement = result || budget.best || budget.partial;
+      const measurement = result || budget.best;
       resolve(measurement ? Object.assign({}, measurement, { requestedBytes: budget.bytes }) :
         { failure: reason || budget.failure || { reason: "insufficient_samples" } });
     }
@@ -588,105 +587,111 @@ async function runDownloadSpeedTest(policy) {
 async function adaptiveDownload(policy, budget) {
   const warmup = await downloadSpeedBlock(policy, SPEED_WARMUP_BYTES, budget);
   if (budget.closed || warmup.reason === "http") return null;
-  const probe = await downloadSpeedBlock(policy, 512 * 1024, budget);
-  let block = probe.ok ? 512 * 1024 : 0;
-  // Small blocks help body/transport failures, not explicit HTTP/WAF rejections.
-  // At most three fallback probes, then stop; never loop on a failed worker.
-  if (!block && (probe.reason === "body_limit" || probe.reason === "body_mismatch" ||
-      (warmup.ok && (probe.reason === "transport" || probe.reason === "timeout")))) {
-    for (let i = 0; i < SPEED_SAFE_BLOCK_SIZES.length && !budget.closed; i++) {
-      const safe = await downloadSpeedBlock(policy, SPEED_SAFE_BLOCK_SIZES[i], budget);
-      if (safe.ok) { block = SPEED_SAFE_BLOCK_SIZES[i]; break; }
-      if (safe.reason === "http" || safe.reason === "deadline") break;
+  // Warmup is excluded from the rate. Its duration only guides sizing/admission;
+  // never subtract RTT, TLS or callback overhead from measured elapsed time.
+  const latency = warmup.ok ? warmup.elapsed : 0;
+  const target = Math.max(1000, latency * 3);
+  let sample = null;
+  for (let i = 0; i < SPEED_SAMPLE_SIZES.length; i++) {
+    const size = SPEED_SAMPLE_SIZES[i];
+    if (sample) {
+      const estimate = latency + Math.max(1, sample.elapsed - latency) * size / sample.bytes;
+      if (!canScheduleSpeed(budget, size, 1, estimate)) break;
     }
-  }
-  if (!block || budget.closed) return null;
-  // Timing difference only chooses sample size; it never corrects the displayed rate.
-  if (block >= 512 * 1024 && warmup.ok && probe.elapsed - warmup.elapsed < 30) {
-    const larger = await downloadSpeedBlock(policy, 2 * 1024 * 1024, budget);
-    if (larger.ok) block = 2 * 1024 * 1024;
-    else if (larger.reason === "http") return null;
-  }
-  const pilot = await measureDownload(policy, block, 1500, 16 * 1024 * 1024, budget, false, 100);
-  if (!pilot) return null;
-  budget.best = speedMeasurementResult(pilot, budget, block < 512 * 1024 ? "小响应降级" : "快速采样");
-  if (pilot.partial) return budget.best;
-  const tier = pilot.mbps > 300 ? "high" : pilot.mbps >= 150 ? "medium" : "low";
-  if (tier === "low" || block < 512 * 1024) {
-    if (block >= 512 * 1024 && pilot.elapsed >= SPEED_MIN_MEASURE_MS && !pilot.partial) budget.best.mode = "低速采样";
-    return budget.best;
-  }
-  // Refinement is optional. Leave room for a useful window and request latency.
-  const reserve = Math.max(SPEED_MIN_MEASURE_MS, warmup.elapsed * 2);
-  if (budget.deadline - Date.now() < SPEED_MIN_MEASURE_MS + reserve) return budget.best;
-  const desired = tier === "high" ? 8 * 1024 * 1024 : 4 * 1024 * 1024;
-  const check = await downloadSpeedBlock(policy, desired, budget);
-  if (!check.ok || budget.closed) return budget.best;
-  block = desired;
-  const duration = Math.min(tier === "high" ? 4000 : 3000, budget.deadline - Date.now() - reserve);
-  if (duration < SPEED_MIN_MEASURE_MS) return budget.best;
-  const result = await measureDownload(policy, block, duration,
-    tier === "high" ? SPEED_MAX_TOTAL_BYTES : 64 * 1024 * 1024, budget, tier === "medium", SPEED_MIN_MEASURE_MS, reserve);
-  return result && !result.partial
-    ? speedMeasurementResult(result, budget, result.upgraded || tier === "high" ? "高速采样" : "中速采样")
-    : budget.best;
-}
-
-function speedMeasurementResult(result, budget, mode) {
-  return { mbps: result.mbps, mbPerSecond: result.mbps / 8, time: Date.now(), mode: mode,
-    requestedBytes: budget.bytes, elapsed: result.elapsed };
-}
-
-function measureDownload(policy, block, duration, cap, budget, adaptive, minimumMS, reserveMS) {
-  const started = Date.now(), stageDeadline = budget.deadline - (reserveMS || 0);
-  const state = { bytes: 0, sent: 0, samples: 0, attempted: 0, lastValid: null, failed: false,
-    block: block, cap: cap, stop: Math.min(stageDeadline, started + duration), active: true, upgraded: false };
-  return new Promise(function (resolve) {
-    let settled = false;
-    function sample() {
-      const elapsed = Math.max(1, Math.min(Date.now(), state.stop) - started);
-      const good = elapsed >= minimumMS && state.samples >= SPEED_MIN_SUCCESS_SAMPLES &&
-        state.bytes >= SPEED_MIN_SUCCESS_BYTES && state.samples / Math.max(1, state.attempted) >= SPEED_MIN_SUCCESS_RATIO;
-      return good ? { mbps: state.bytes * 8 / elapsed / 1000, elapsed: elapsed, upgraded: state.upgraded, partial: state.failed } : null;
-    }
-    function finish() {
-      if (settled) return;
-      settled = true; state.active = false;
-      const result = sample();
-      resolve(result || (state.lastValid ? Object.assign({}, state.lastValid, { partial: true }) : null));
-    }
-    // Drain existing workers before another stage; resolving early can exceed four.
-    // Save qualified completed samples so the overall watchdog cannot discard them.
-    setTimeout(function () { state.active = false; }, Math.max(1, Math.min(stageDeadline - started, adaptive ? 4000 : duration)));
-    async function worker() {
-      while (state.active && !budget.closed && Date.now() < state.stop) {
-        const bytes = state.block;
-        if (state.sent + bytes > state.cap || budget.bytes + bytes > SPEED_MAX_TOTAL_BYTES || budget.requests >= 256) return;
-        state.sent += bytes; state.attempted++;
-        const response = await downloadSpeedBlock(policy, bytes, budget);
-        if (!state.active || budget.closed) return;
-        if (response.ok && Date.now() <= state.stop) { state.bytes += response.bytes; state.samples++; }
-        else {
-          state.failed = true;
-          if (response.reason === "http") state.active = false;
-          return;
-        }
-        const current = sample();
-        if (current) {
-          state.lastValid = current;
-          if (!budget.best) budget.partial = speedMeasurementResult(current, budget, block < 512 * 1024 ? "小响应降级" : "快速采样");
-        }
-        const elapsed = Date.now() - started;
-        if (adaptive && !state.upgraded && elapsed >= 500 && state.bytes * 8 / elapsed / 1000 > 300) {
-          state.upgraded = true; state.cap = SPEED_MAX_TOTAL_BYTES;
-          state.stop = Math.min(stageDeadline, started + 4000);
-        }
+    const next = await downloadSpeedBlock(policy, size, budget);
+    if (budget.closed) return budget.best;
+    if (!next.ok) {
+      if (budget.best) return budget.best;
+      // A working block may be too brief on its own. If only the larger body is
+      // rejected/truncated, accumulate that known-good size instead of discarding it.
+      if (sample && (next.reason === "body_limit" || next.reason === "body_mismatch")) {
+        return smallDownload(policy, budget, sample);
       }
+      if (i === 0 && (next.reason === "body_limit" || next.reason === "body_mismatch" ||
+          (warmup.ok && (next.reason === "transport" || next.reason === "timeout")))) {
+        return smallDownload(policy, budget);
+      }
+      return null;
     }
-    const workers = [];
-    for (let i = 0; i < SPEED_WORKER_COUNT; i++) workers.push(worker());
-    Promise.all(workers).then(finish, finish);
-  });
+    sample = next;
+    // One complete large, sufficiently long response is a useful quick estimate.
+    // Save it immediately, before optional larger requests or confirmation.
+    rememberSpeedSample(next.bytes, next.elapsed, budget, "快速采样", 512 * 1024);
+    if (next.elapsed >= target) break;
+  }
+  if (!sample || budget.closed) return budget.best;
+
+  // Confirm a long sample sequentially. A short final ramp sample may use one
+  // fixed pair to amortize RTT; there is no replenishing worker pool/window.
+  const count = sample.elapsed >= target ? 1 : SPEED_WORKER_COUNT;
+  if (!canScheduleSpeed(budget, sample.bytes, count, sample.elapsed * count)) return budget.best;
+  if (count === 1) {
+    const repeated = await downloadSpeedBlock(policy, sample.bytes, budget);
+    if (repeated.ok && !budget.closed) {
+      rememberSpeedSample(sample.bytes + repeated.bytes, sample.elapsed + repeated.elapsed,
+        budget, "顺序采样", 512 * 1024);
+    }
+  } else {
+    await measureDownload(policy, sample.bytes, count, budget);
+  }
+  return budget.best;
+}
+
+function canScheduleSpeed(budget, bytes, count, estimateMS) {
+  return !budget.closed && budget.bytes + bytes * count <= SPEED_MAX_TOTAL_BYTES &&
+    budget.requests + count <= SPEED_MAX_REQUESTS &&
+    estimateMS + 100 < budget.deadline - Date.now() &&
+    estimateMS < SPEED_REQUEST_TIMEOUT * 1000;
+}
+
+function rememberSpeedSample(bytes, elapsed, budget, mode, minimumBytes) {
+  if (budget.closed || bytes < minimumBytes || elapsed < SPEED_MIN_MEASURE_MS) return false;
+  const mbps = bytes * 8 / elapsed / 1000;
+  budget.best = { mbps: mbps, mbPerSecond: mbps / 8, time: Date.now(), mode: mode,
+    requestedBytes: budget.bytes, elapsed: elapsed };
+  return true;
+}
+
+async function measureDownload(policy, block, count, budget) {
+  const started = Date.now();
+  // Scheduling ends as soon as this fixed batch is issued. Drain until all
+  // callbacks finish or the global watchdog closes the budget; no nominal stop
+  // discards an in-flight success. The denominator includes the LAST callback.
+  const pending = [];
+  for (let i = 0; i < Math.min(count, SPEED_WORKER_COUNT); i++) {
+    pending.push(downloadSpeedBlock(policy, block, budget).then(function (response) {
+      // Even if the other callback is lost, a qualified complete large response
+      // remains useful. Do not replace an existing ramp result with a partial pair.
+      if (response.ok && !budget.best) rememberSpeedSample(response.bytes, response.elapsed, budget, "快速采样", 512 * 1024);
+      return response;
+    }));
+  }
+  const responses = await Promise.all(pending);
+  if (budget.closed || !responses.length || responses.some(function (response) { return !response.ok; })) return null;
+  const bytes = responses.reduce(function (sum, response) { return sum + response.bytes; }, 0);
+  rememberSpeedSample(bytes, Date.now() - started, budget, "双样本采样", 512 * 1024);
+  return budget.best;
+}
+
+async function smallDownload(policy, budget, sample) {
+  // Only before a qualified result exists. Reuse a complete known-good block or
+  // try at most three shrinking probes; explicit HTTP errors stop immediately.
+  for (let i = 0; !sample && i < SPEED_SAFE_BLOCK_SIZES.length && !budget.closed; i++) {
+    const response = await downloadSpeedBlock(policy, SPEED_SAFE_BLOCK_SIZES[i], budget);
+    if (response.ok) { sample = response; break; }
+    if (response.reason === "http" || response.reason === "deadline") return null;
+  }
+  if (!sample || budget.closed) return null;
+  let bytes = sample.bytes, elapsed = sample.elapsed, count = 1;
+  for (; count < 10 && !budget.closed; count++) {
+    if (count >= 3 && rememberSpeedSample(bytes, elapsed, budget, "小响应降级", SPEED_MIN_SUCCESS_BYTES)) return budget.best;
+    if (!canScheduleSpeed(budget, sample.bytes, 1, sample.elapsed)) break;
+    const next = await downloadSpeedBlock(policy, sample.bytes, budget);
+    if (!next.ok) return budget.best;
+    bytes += next.bytes; elapsed += next.elapsed;
+  }
+  if (count >= 3) rememberSpeedSample(bytes, elapsed, budget, "小响应降级", SPEED_MIN_SUCCESS_BYTES);
+  return budget.best;
 }
 
 function downloadSpeedBlock(policy, blockBytes, budget) {
@@ -701,7 +706,7 @@ function downloadSpeedBlock(policy, blockBytes, budget) {
         reason: reason || "", status: status || 0 });
     }
     if (budget.closed || remaining <= 0) { finish("deadline"); return; }
-    if (budget.bytes + blockBytes > SPEED_MAX_TOTAL_BYTES || budget.requests >= 256) { finish("insufficient_samples"); return; }
+    if (budget.bytes + blockBytes > SPEED_MAX_TOTAL_BYTES || budget.requests >= SPEED_MAX_REQUESTS) { finish("insufficient_samples"); return; }
     budget.bytes += blockBytes; budget.requests++;
     const request = {
       url: "https://speed.cloudflare.com/__down?bytes=" + blockBytes + "&_=" + started + "-" + budget.requests,
@@ -721,7 +726,6 @@ function downloadSpeedBlock(policy, blockBytes, budget) {
           if (!(status >= 200 && status < 300)) { finish("transport"); return; }
           const bytes = binaryLength(data);
           if (bytes !== blockBytes) { finish("body_mismatch"); return; }
-          if (Date.now() - started < SPEED_MIN_SAMPLE_MS) { finish("insufficient_samples"); return; }
           finish("", status, bytes);
         } catch (_) { finish("transport"); }
       });
@@ -757,7 +761,7 @@ function readSpeedResult() {
   const saved = readJSON(SPEED_KEY);
   if (!saved || !finiteInRange(saved.mbps, 0.001, 100000) || !finiteInRange(saved.time, 1, Date.now())) return null;
   return { mbps: Number(saved.mbps), mbPerSecond: Number(saved.mbps) / 8, time: Number(saved.time),
-    ip: normalizeIP(saved.ip), mode: ["低速采样", "中速采样", "高速采样", "小响应降级", "快速采样"].indexOf(saved.mode) >= 0 ? saved.mode : "" };
+    ip: normalizeIP(saved.ip), mode: ["低速采样", "中速采样", "高速采样", "小响应降级", "快速采样", "顺序采样", "双样本采样"].indexOf(saved.mode) >= 0 ? saved.mode : "" };
 }
 
 function saveSpeedResult(result) {
@@ -1409,8 +1413,8 @@ function appendRiskLines(lines, risk) {
   const types = { isp: "ISP", hosting: "托管", business: "商业", education: "教育", government: "政府", banking: "银行" };
   lines.push("🛡 Trust " + (risk.trust === null ? "未知" : risk.trust + "/100") +
     (types[risk.type] ? " · " + types[risk.type] : "") + " · Net.Coffee");
-  lines.push("住宅 " + signalState(s.residential) + " · 机房 " + signalState(s.hosting) +
-    " · VPN " + signalState(s.vpn) + " · 代理 " + signalState(s.proxy) + " · Tor " + signalState(s.tor));
+  lines.push("住宅" + signalState(s.residential) + " · 机房" + signalState(s.hosting) +
+    " · VPN" + signalState(s.vpn) + " · 代理" + signalState(s.proxy) + " · Tor" + signalState(s.tor));
   const extra = [["abuse", "滥用记录"], ["mobile", "移动网络"], ["crawler", "爬虫"]]
     .filter(function (pair) { return s[pair[0]] === true; }).map(function (pair) { return pair[1]; });
   if (extra.length) lines.push(extra.join(" / "));
