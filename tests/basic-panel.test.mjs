@@ -871,3 +871,26 @@ test('speed UI: cache from a previous day retains its date', async () => {
   assert.match(await rt.run('speedTimeLabel(Date.now()-86400000)'), /^09\/10 \d{2}:\d{2}$/);
   assert.match(await rt.run('speedTimeLabel(Date.now())'), /^\d{2}:\d{2}$/);
 });
+
+test('sampler regression: completed bodies arriving after the old 1500ms window remain usable', async () => {
+  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, 1800) });
+  const result = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000};return measureDownload('',512*1024,1500,4*512*1024,b,false,100);})()");
+  assert.ok(result && result.mbps > 0, 'four complete responses before the global deadline must not be discarded');
+  assert.equal(result.elapsed, 1800, 'counted late bytes require their actual completion time');
+});
+
+test('sampler regression: started but incomplete requests must not invalidate completed samples', async () => {
+  let n = 0;
+  const rt = runtime({ speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, ++n <= 2 ? n * 200 : 1800) });
+  const result = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000};return measureDownload('',512*1024,1500,6*512*1024,b,false,100);})()");
+  assert.ok(result && result.mbps > 0, 'there were completed valid bodies and no HTTP/transport failures');
+});
+
+test('sampler regression: end-to-end delayed complete callbacks yield a fresh estimate', async () => {
+  const rt = runtime({ trigger: 'button', speedReply: (q, bytes) =>
+    reply({ byteLength: bytes }, 200, {}, bytes <= 32 * 1024 ? 10 : 1800) });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(result.state, 'fresh');
+  assert.ok(result.mbps > 0);
+  assert.ok(rt.now() - NOW <= 8000);
+});
