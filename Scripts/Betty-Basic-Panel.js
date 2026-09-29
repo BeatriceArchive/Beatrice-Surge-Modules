@@ -107,7 +107,7 @@ async function main() {
   lines.push("", "⚡ DIRECT " + fmtMs(results[2]) + " · " +
     (POLICY ? "指定策略 " : "当前 ") + fmtMs(results[3]));
   appendSpeedLines(lines, speed);
-  appendServiceLines(lines, "🎬 流媒体", media, true);
+  appendServiceLines(lines, "🎬 流媒体", media);
   appendServiceLines(lines, "✨ AI", ai);
   lines.push("");
   appendUsageLines(lines, results[16]);
@@ -610,6 +610,7 @@ async function adaptiveDownload(policy, budget) {
   const pilot = await measureDownload(policy, block, 1500, 16 * 1024 * 1024, budget, false, 100);
   if (!pilot) return null;
   budget.best = speedMeasurementResult(pilot, budget, block < 512 * 1024 ? "小响应降级" : "快速采样");
+  if (pilot.partial) return budget.best;
   const tier = pilot.mbps > 300 ? "high" : pilot.mbps >= 150 ? "medium" : "low";
   if (tier === "low" || block < 512 * 1024) {
     if (block >= 512 * 1024 && pilot.elapsed >= SPEED_MIN_MEASURE_MS && !pilot.partial) budget.best.mode = "低速采样";
@@ -625,7 +626,7 @@ async function adaptiveDownload(policy, budget) {
   const duration = Math.min(tier === "high" ? 4000 : 3000, budget.deadline - Date.now() - reserve);
   if (duration < SPEED_MIN_MEASURE_MS) return budget.best;
   const result = await measureDownload(policy, block, duration,
-    tier === "high" ? SPEED_MAX_TOTAL_BYTES : 64 * 1024 * 1024, budget, tier === "medium", SPEED_MIN_MEASURE_MS);
+    tier === "high" ? SPEED_MAX_TOTAL_BYTES : 64 * 1024 * 1024, budget, tier === "medium", SPEED_MIN_MEASURE_MS, reserve);
   return result && !result.partial
     ? speedMeasurementResult(result, budget, result.upgraded || tier === "high" ? "高速采样" : "中速采样")
     : budget.best;
@@ -636,17 +637,17 @@ function speedMeasurementResult(result, budget, mode) {
     requestedBytes: budget.bytes, elapsed: result.elapsed };
 }
 
-function measureDownload(policy, block, duration, cap, budget, adaptive, minimumMS) {
-  const started = Date.now();
-  const state = { bytes: 0, sent: 0, samples: 0, attempted: 0, lastValid: null,
-    block: block, cap: cap, stop: Math.min(budget.deadline, started + duration), active: true, upgraded: false };
+function measureDownload(policy, block, duration, cap, budget, adaptive, minimumMS, reserveMS) {
+  const started = Date.now(), stageDeadline = budget.deadline - (reserveMS || 0);
+  const state = { bytes: 0, sent: 0, samples: 0, attempted: 0, lastValid: null, failed: false,
+    block: block, cap: cap, stop: Math.min(stageDeadline, started + duration), active: true, upgraded: false };
   return new Promise(function (resolve) {
     let settled = false;
     function sample() {
       const elapsed = Math.max(1, Math.min(Date.now(), state.stop) - started);
       const good = elapsed >= minimumMS && state.samples >= SPEED_MIN_SUCCESS_SAMPLES &&
         state.bytes >= SPEED_MIN_SUCCESS_BYTES && state.samples / Math.max(1, state.attempted) >= SPEED_MIN_SUCCESS_RATIO;
-      return good ? { mbps: state.bytes * 8 / elapsed / 1000, elapsed: elapsed, upgraded: state.upgraded } : null;
+      return good ? { mbps: state.bytes * 8 / elapsed / 1000, elapsed: elapsed, upgraded: state.upgraded, partial: state.failed } : null;
     }
     function finish() {
       if (settled) return;
@@ -656,7 +657,7 @@ function measureDownload(policy, block, duration, cap, budget, adaptive, minimum
     }
     // Drain existing workers before another stage; resolving early can exceed four.
     // Save qualified completed samples so the overall watchdog cannot discard them.
-    setTimeout(function () { state.active = false; }, Math.max(1, Math.min(budget.deadline - started, adaptive ? 4000 : duration)));
+    setTimeout(function () { state.active = false; }, Math.max(1, Math.min(stageDeadline - started, adaptive ? 4000 : duration)));
     async function worker() {
       while (state.active && !budget.closed && Date.now() < state.stop) {
         const bytes = state.block;
@@ -666,6 +667,7 @@ function measureDownload(policy, block, duration, cap, budget, adaptive, minimum
         if (!state.active || budget.closed) return;
         if (response.ok && Date.now() <= state.stop) { state.bytes += response.bytes; state.samples++; }
         else {
+          state.failed = true;
           if (response.reason === "http") state.active = false;
           return;
         }
@@ -677,7 +679,7 @@ function measureDownload(policy, block, duration, cap, budget, adaptive, minimum
         const elapsed = Date.now() - started;
         if (adaptive && !state.upgraded && elapsed >= 500 && state.bytes * 8 / elapsed / 1000 > 300) {
           state.upgraded = true; state.cap = SPEED_MAX_TOTAL_BYTES;
-          state.stop = Math.min(budget.deadline, started + 4000);
+          state.stop = Math.min(stageDeadline, started + 4000);
         }
       }
     }

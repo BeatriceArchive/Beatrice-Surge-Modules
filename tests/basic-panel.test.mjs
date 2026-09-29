@@ -191,7 +191,7 @@ test('website fallback: default routing stays optional and raw body/errors never
 for (const state of ['reachable', 'restricted', 'unreachable', 'unknown', 'error']) test(`streaming summary: ${state} is counted without hiding failed checks`, async () => {
   const rt = runtime();
   const items = Array.from({ length: 6 }, (_, i) => ({ name: `Service ${i}`, state: i < 4 ? 'reachable' : state, label: state }));
-  const lines = await rt.run(`(function () { const lines = []; appendServiceLines(lines, '🎬 流媒体', ${JSON.stringify(items)}, true); return lines; })()`);
+  const lines = await rt.run(`(function () { const lines = []; appendServiceLines(lines, '🎬 流媒体', ${JSON.stringify(items)}); return lines; })()`);
   assert.match(lines[1], new RegExp(`流媒体 ${state === 'reachable' ? 6 : 4}/6`));
   if (state !== 'reachable') assert.match(lines[1], new RegExp(`${{ restricted: '受限', unreachable: '不达', unknown: '未知', error: '异常' }[state]} 2`));
   assert.doesNotMatch(lines[1], /受限 0|不达 0|未知 0/);
@@ -389,7 +389,7 @@ test('main: button performs bounded adaptive test, explicit policy stays out of 
   assert.match(rt.done[0].content, /测速.*Mbps/); assert.match(rt.done[0].content, /[●○]{10} · 500 Mbps/);
   assert.equal(JSON.stringify([rt.logs, rt.writes, rt.done]).includes(policy), false);
   assert.ok(rt.calls.filter(q => !q.url.includes('gstatic.com')).every(q => q.policy === policy));
-  assert.ok(rt.done[0].content.split('\n').length <= 27, 'single panel is compact on mobile');
+  assert.ok(rt.done[0].content.split('\n').length <= 24, 'single panel is compact on mobile');
 });
 
 test('parameters: RISK=0 makes no reputation query; YS=0 deliberately reveals IP', async () => {
@@ -826,7 +826,7 @@ test('compact panel: 500 is abnormal, successful GET is quiet, Taiwan uses text,
   assert.match(text, /📦 剩余 298.57 \/ 300 GB · 99.5%/);
   assert.match(text, /已用 1.43 GB · 到期 12\/29/);
   assert.equal((text.match(/Net\.Coffee/g) || []).length, 1);
-  assert.ok(text.split('\n').length <= 27);
+  assert.ok(text.split('\n').length <= 24);
 });
 
 test('compact panel: unknown organization/ASN is omitted and tri-state signals stay distinct', async () => {
@@ -836,4 +836,38 @@ test('compact panel: unknown organization/ASN is omitted and tri-state signals s
   await rt.run('main()'); const text = rt.done[0].content;
   assert.match(text, /Trust 未知/); assert.match(text, /住宅 ✓ · 机房 ✕ · VPN \?/);
   assert.doesNotMatch(text, /机构未知|AS未知|类型未知|越高越可信/);
+});
+
+
+test('speed: a partly successful refinement that later fails must still use the pilot label', async () => {
+  let large = 0;
+  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) => {
+    if (bytes >= 4 * 1024 * 1024 && ++large === 8) return reply({ byteLength: 0 }, 503, {}, 900);
+  } });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.ok(large >= 8); assert.ok(result.mbps > 0); assert.equal(result.mode, '快速采样');
+  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 4);
+});
+
+test('speed: pilot HTTP failure after valid samples does not start optional refinement', async () => {
+  let blocks = 0;
+  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) => {
+    if (bytes === 2 * 1024 * 1024 && ++blocks === 7) return reply({ byteLength: 0 }, 429, {}, 600);
+  } });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.ok(blocks >= 7); assert.ok(result.mbps > 0); assert.equal(result.mode, '快速采样');
+  assert.equal(rt.calls.some(q => Number(new URL(q.url).searchParams.get('bytes')) >= 4 * 1024 * 1024), false);
+});
+
+test('speed: adaptive refinement respects the reserved drain window', async () => {
+  const rt = runtime({ speedMbps: 800 });
+  const result = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+3000};return measureDownload('',4*1024*1024,1000,128*1024*1024,b,true,500,1000);})()");
+  assert.ok(result.mbps > 0); assert.equal(result.upgraded, true);
+  assert.ok(rt.calls.every(q => q.time < NOW + 2000), 'adaptive extension cannot consume reserved time');
+});
+
+test('speed UI: cache from a previous day retains its date', async () => {
+  const rt = runtime();
+  assert.match(await rt.run('speedTimeLabel(Date.now()-86400000)'), /^09\/10 \d{2}:\d{2}$/);
+  assert.match(await rt.run('speedTimeLabel(Date.now())'), /^\d{2}:\d{2}$/);
 });
