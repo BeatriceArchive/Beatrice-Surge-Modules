@@ -11,7 +11,7 @@
  * - 无 MITM、Rewrite、Rule、eval、Function()、远程代码或第三方统计服务。
  * - 所有 $httpClient 请求均关闭 auto-cookie，不发送 Cookie、Authorization 或 Profile 正文。
  * - 仅在 $trigger === "button" 时使用 $httpClient 快速估算下载速度；自动刷新只读
- *   本地测速缓存。固定多流批次，全流程 8 秒、64 MiB 请求体积，最多 3 个并行请求。
+ *   本地测速缓存。固定多流批次，全流程 8 秒、64 MiB 下载申请量，最多 3 个并行请求。
  * - 当前 Profile 只通过官方 /v1/profiles/current?sensitive=0 读取脱敏文本；不读取敏感版本，
  *   不保存 Profile、Managed URL、订阅 Token 或 subscription-userinfo 原始 Header。
  *
