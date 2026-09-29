@@ -70,6 +70,7 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
       active--; if (speed) activeSpeed--;
       callback(r.error || null, r.error && !r.responseOnError ? null : { status: r.status ?? 200, headers: r.headers || {} },
         speed ? r.body : typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {}));
+      if (r.duplicate) callback('private duplicate failure', { status: 503, headers: {} }, null);
     }, r.delay ?? 10, 'network');
   }]));
   const context = vm.createContext({
@@ -104,7 +105,7 @@ function runtime({ respond = defaultReply, trigger = 'auto-interval', argument =
   return { context, run, calls, apiCalls, store, writes, logs, done, stats, now: () => clock };
 }
 
-for (const [status, state] of [[200, 'reachable'], [302, 'reachable'], [401, 'restricted'], [403, 'restricted'], [429, 'restricted'], [405, 'unknown'], [500, 'unknown']]) test(`AI/site: HTTP ${status} means ${state}, not full availability`, async () => {
+for (const [status, state] of [[200, 'reachable'], [302, 'reachable'], [401, 'restricted'], [403, 'restricted'], [429, 'restricted'], [405, 'unknown'], [500, 'error']]) test(`AI/site: HTTP ${status} means ${state}, not full availability`, async () => {
   const rt = runtime({ respond: () => reply('', status) });
   const result = await rt.run("testAIReachable('https://chatgpt.com/','')");
   assert.equal(result.state, state); assert.doesNotMatch(result.label, /✓|完整|解锁/);
@@ -121,21 +122,23 @@ for (const host of METHOD_FALLBACK_SITES) {
     const rt = runtime({ respond: () => reply('', status, { location: 'https://other.invalid/login' }) });
     const result = await rt.run(`testServiceReachable('https://${host}/','')`);
     assert.equal(rt.calls.length, 1); assert.equal(rt.calls[0].method, 'head');
-    assert.equal(result.state, status < 400 ? 'reachable' : status === 500 ? 'unknown' : 'restricted');
+    assert.equal(result.state, status < 400 ? 'reachable' : status === 500 ? 'error' : 'restricted');
     assert.doesNotMatch(result.label, /GET|地区受限|解锁/);
   });
   for (const status of [405, 501]) test(`${host}: HEAD ${status} gets exactly one same-entry GET`, async () => {
     const rt = runtime({ respond: q => reply('', q.method === 'head' ? status : 200) });
     const result = await rt.run(`testServiceReachable('https://${host}/','Test Policy')`);
-    assert.equal(result.label, '可达 (GET 200)');
+    assert.equal(result.label, '可达');
     assert.deepEqual(rt.calls.map(q => q.method), ['head', 'get']);
     assert.ok(rt.calls.every(q => q.url === `https://${host}/` && q.policy === 'Test Policy'));
     assert.equal(rt.calls[1].timeout, 4);
   });
-  for (const [status, state] of [[200, 'reachable'], [307, 'reachable'], [403, 'restricted'], [451, 'restricted'], [405, 'unknown'], [501, 'unknown'], [503, 'unknown']]) test(`${host}: fallback GET ${status} uses actual evidence without retry or redirect`, async () => {
+  for (const [status, state] of [[200, 'reachable'], [307, 'reachable'], [403, 'restricted'], [451, 'restricted'], [405, 'unknown'], [501, 'error'], [503, 'error']]) test(`${host}: fallback GET ${status} uses actual evidence without retry or redirect`, async () => {
     const rt = runtime({ respond: q => reply('', q.method === 'head' ? 405 : status, { location: '/region/fe/', 'Set-Cookie': 'session=must-not-send' }) });
     const result = await rt.run(`testServiceReachable('https://${host}/','')`);
-    assert.equal(result.state, state); assert.match(result.label, new RegExp(`GET ${status}`));
+    assert.equal(result.state, state);
+    if (state === 'reachable') assert.doesNotMatch(result.label, /GET/);
+    else assert.match(result.label, new RegExp(`GET ${status}`));
     if (state === 'restricted') assert.match(result.label, new RegExp(`受限 ${status}`));
     assert.equal(rt.calls.length, 2);
     assert.ok(rt.calls.every(q => q['auto-redirect'] === false && q['auto-cookie'] === false));
@@ -146,14 +149,14 @@ for (const host of METHOD_FALLBACK_SITES) {
     const rt = runtime({ respond: q => q.method === 'head' ? reply('', 405) : failure });
     const result = await rt.run(`testServiceReachable('https://${host}/','')`);
     assert.equal(result.state, 'unreachable'); assert.equal(rt.calls.length, 2);
-    assert.match(result.label, failure && failure !== 'hang' ? /GET 200\/传输失败/ : /GET 无响应/);
+    assert.match(result.label, failure && failure !== 'hang' ? /GET 200\/传输失败/ : /GET 超时/);
     assert.ok(rt.now() - NOW <= 6010, 'GET fallback callback/watchdog is bounded');
   });
 }
 
 for (const failure of [reply('', 0), null, 'hang', { error: 'HEAD unsupported', status: 200, responseOnError: true }]) test(`TikTok: HEAD ${failure === 'hang' ? 'missing callback' : failure?.status === 0 ? 'status zero' : 'transport failure'} may use one GET`, async () => {
   const rt = runtime({ respond: q => q.method === 'head' ? failure : reply('', 200) });
-  assert.equal((await rt.run("testServiceReachable('https://www.tiktok.com/','')")).label, '可达 (GET 200)');
+  assert.equal((await rt.run("testServiceReachable('https://www.tiktok.com/','')")).label, '可达');
   assert.deepEqual(rt.calls.map(q => q.method), ['head', 'get']);
 });
 
@@ -185,14 +188,14 @@ test('website fallback: default routing stays optional and raw body/errors never
   assert.doesNotMatch(JSON.stringify([result, rt.logs, rt.writes, rt.calls]), /SECRET|private\.invalid/);
 });
 
-for (const state of ['reachable', 'restricted', 'unreachable', 'unknown']) test(`streaming summary: ${state} is counted without hiding failed checks`, async () => {
+for (const state of ['reachable', 'restricted', 'unreachable', 'unknown', 'error']) test(`streaming summary: ${state} is counted without hiding failed checks`, async () => {
   const rt = runtime();
   const items = Array.from({ length: 6 }, (_, i) => ({ name: `Service ${i}`, state: i < 4 ? 'reachable' : state, label: state }));
   const lines = await rt.run(`(function () { const lines = []; appendServiceLines(lines, '🎬 流媒体', ${JSON.stringify(items)}, true); return lines; })()`);
-  assert.match(lines[1], new RegExp(`可达 ${state === 'reachable' ? 6 : 4}/6`));
-  if (state !== 'reachable') assert.match(lines[1], new RegExp(`${{ restricted: '受限', unreachable: '不达', unknown: '未知' }[state]} 2`));
+  assert.match(lines[1], new RegExp(`流媒体 ${state === 'reachable' ? 6 : 4}/6`));
+  if (state !== 'reachable') assert.match(lines[1], new RegExp(`${{ restricted: '受限', unreachable: '不达', unknown: '未知', error: '异常' }[state]} 2`));
   assert.doesNotMatch(lines[1], /受限 0|不达 0|未知 0/);
-  assert.equal(lines.length, 5, 'one summary and three paired service lines');
+  assert.equal(lines.length, 4, 'one summary and two rows of three services');
 });
 
 test('website fallback: auto refresh adds at most two GETs, does not speed test or change Geo/reputation', async () => {
@@ -201,19 +204,19 @@ test('website fallback: auto refresh adds at most two GETs, does not speed test 
   await rt.run('main()');
   assert.equal(rt.calls.length, 18); assert.ok(rt.stats.peak <= 16);
   assert.equal(rt.calls.filter(q => q.url.includes('/__down')).length, 0);
-  assert.match(rt.done[0].content, /流媒体 · 可达 4\/6 · 受限 2/);
-  assert.match(rt.done[0].content, /Net\.Coffee · 单源/);
+  assert.match(rt.done[0].content, /流媒体 4\/6 · 受限 2/);
+  assert.match(rt.done[0].content, /Net\.Coffee/);
   assert.match(rt.done[0].content, /Trust 85\/100/);
-  assert.match(rt.done[0].content, /TikTok 受限 403 \(GET 403\)/);
+  assert.match(rt.done[0].content, /TikTok GET 403/);
   assert.doesNotMatch(rt.done[0].content, /地区受限/);
   const next = runtime({ store, clockStart: NOW + 60000, respond: q => METHOD_FALLBACK_SITES.some(host => q.url === `https://${host}/`) ? reply('', q.method === 'head' ? 405 : 200) : defaultReply(q) });
   await next.run('main()'); assert.equal(next.calls.length, 17);
-  assert.match(next.done[0].content, /TikTok 可达 \(GET 200\)/, 'HK Geo alone must not force restriction');
+  assert.match(next.done[0].content, /TikTok ✓/, 'HK Geo alone must not force restriction');
 });
 
 test('Netflix: full regional title-page evidence still does not claim playback unlock', async () => {
   const rt = runtime(); const result = await rt.run("testNetflix('')");
-  assert.equal(result.label, '样片可达 🇭🇰'); assert.doesNotMatch(result.label, /解锁|完整/);
+  assert.equal(result.label, '样片可达 香港'); assert.doesNotMatch(result.label, /解锁|完整/);
 });
 
 test('Netflix: only fallback title available is limited, not full', async () => {
@@ -240,9 +243,9 @@ for (const [body, label] of [
 test('IPv6: local address and profile declaration never imply effective VIF or IPv6 egress', async () => {
   const rt = runtime({ network: { v4: { primaryAddress: IP }, v6: { primaryAddress: '2001:db8::1' } } });
   await rt.run('main()'); const text = rt.done[0].content;
-  assert.match(text, /IPv6 本地有 · VIF 未知/); assert.match(text, /IPv6 出口未测/);
+  assert.match(text, /IPv6 本地/); assert.doesNotMatch(text, /VIF|出口未测|IPv6 出口 ✓/);
   assert.doesNotMatch(text, /IPv6 ✓|VIF 关闭|IPv6 已启用/);
-  assert.match(await rt.run("formatIPv6('','2001:4860:4860::8888')"), /观测出口 IPv6 可达/);
+  assert.match(await rt.run("formatIPv6('','2001:4860:4860::8888')"), /IPv6 出口 ✓/);
 });
 
 test('IP validation: equivalent IPv6 matches; malformed IP, loopback and local addresses cannot be sent as public queries', async () => {
@@ -256,7 +259,7 @@ test('DNS/NAT: exact resolver identity and inference only; unknown delay is not 
   assert.equal(await rt.run("detectDNS(['11.1.1.10'])"), '自定义');
   assert.equal(await rt.run("detectDNS(['1.1.1.1','8.8.8.8'])"), 'Cloudflare/Google');
   assert.equal(await rt.run("inferNAT('100.64.2.3')"), 'CGNAT 候选');
-  assert.equal(await rt.run("inferNAT('192.168.1.3')"), '私网 / NAT 推断');
+  assert.equal(await rt.run("inferNAT('192.168.1.3')"), 'NAT 推断');
   assert.equal(await rt.run("inferNAT('')"), 'NAT 未测');
   assert.equal(await rt.run('fmtMs(null)'), '未知');
   for (const delay of [0.002, 5, 25]) {
@@ -292,7 +295,7 @@ test('speed: network failure and hung callback preserve last success and its tim
     const saved = JSON.stringify({ mbps: 300, mbPerSecond: 37.5, time: NOW - 3600000, ip: IP });
     const rt = runtime({ trigger: 'button', failSpeed, store: new Map([[SPEED, saved]]) });
     const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
-    assert.equal(value.mbps, 300); assert.equal(value.time, NOW - 3600000); assert.match(value.notice, /本次失败/);
+    assert.equal(value.mbps, 300); assert.equal(value.time, NOW - 3600000); assert.equal(value.state, 'failed'); assert.ok(value.failure.reason);
     assert.equal(rt.store.get(SPEED), saved); assert.ok(rt.now() - NOW <= 8000);
   }
 });
@@ -301,14 +304,14 @@ test('speed: rapid second button press cannot add downloads; cache from another 
   const rt = runtime({ trigger: 'button', speedMbps: 25 });
   await rt.run("getSpeedForThisRun('', '8.8.4.4')"); const count = rt.calls.length;
   const again = await rt.run("getSpeedForThisRun('', '1.1.1.1')");
-  assert.equal(rt.calls.length, count); assert.equal(again.otherExit, true); assert.match(again.notice, /冷却/);
+  assert.equal(rt.calls.length, count); assert.equal(again.otherExit, true); assert.equal(again.state, 'cooldown');
 });
 
 test('speed: bytes never come from string length or Content-Length, bar is labelled 500 Mbps', async () => {
   const rt = runtime();
   assert.equal(await rt.run("binaryLength('x'.repeat(8192))"), 0);
   assert.equal(await rt.run("binaryLength(new Uint8Array(37))"), 37);
-  assert.match(await rt.run('speedResultBar(500)'), /^●{10} · 满格 500 Mbps$/);
+  assert.match(await rt.run('speedResultBar(500)'), /^●{10} · 500 Mbps$/);
   assert.match(await rt.run('speedResultBar(200)'), /^●{4}○{6}/);
 });
 
@@ -345,13 +348,13 @@ test('main: request budget, no auto speed, masked IP, optional policy, no creden
 test('main: one AI 403 does not turn a healthy network orange; IPv4-only is explicit', async () => {
   const rt = runtime({ respond: q => q.url.includes('chatgpt.com') ? reply('', 403) : defaultReply(q) });
   await rt.run('main()'); assert.equal(rt.done[0]['icon-color'], '#30D158');
-  assert.match(rt.done[0].content, /ChatGPT 受限 403/); assert.match(rt.done[0].content, /IPv6 本地未发现/);
+  assert.match(rt.done[0].content, /GPT 403/); assert.doesNotMatch(rt.done[0].content, /IPv6 未测|VIF|IPv6 本地未发现/);
 });
 
 test('main: all sources failing still renders local information without leaking original error bodies', async () => {
   const secret = 'fixture-token-cookie-authorization';
   const rt = runtime({ respond: () => ({ error: `failed URL ${secret}`, delay: 10 }) });
-  await rt.run('main()'); assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /出口 IP 未识别/);
+  await rt.run('main()'); assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /IP 情报暂不可用/);
   assert.equal(JSON.stringify([rt.done, rt.logs, rt.writes]).includes(secret), false); assert.equal(rt.done[0]['icon-color'], '#FF453A');
 });
 
@@ -383,10 +386,10 @@ test('main: button performs bounded adaptive test, explicit policy stays out of 
   const policy = 'fixture-private-policy';
   const rt = runtime({ trigger: 'button', speedMbps: 500, argument: 'YS=1&RISK=1&POLICY=' + policy });
   await rt.run('main()'); assert.equal(rt.done.length, 1); assert.ok(rt.stats.peakSpeed <= 4);
-  assert.match(rt.done[0].content, /下载估算.*Mbps/); assert.match(rt.done[0].content, /高速采样/);
+  assert.match(rt.done[0].content, /测速.*Mbps/); assert.match(rt.done[0].content, /[●○]{10} · 500 Mbps/);
   assert.equal(JSON.stringify([rt.logs, rt.writes, rt.done]).includes(policy), false);
   assert.ok(rt.calls.filter(q => !q.url.includes('gstatic.com')).every(q => q.policy === policy));
-  assert.ok(rt.done[0].content.split('\n').length <= 38, 'single panel remains bounded in height');
+  assert.ok(rt.done[0].content.split('\n').length <= 27, 'single panel is compact on mobile');
 });
 
 test('parameters: RISK=0 makes no reputation query; YS=0 deliberately reveals IP', async () => {
@@ -441,7 +444,7 @@ test('Net.Coffee: independent residential/hosting/business/proxy/VPN/Tor signals
   assert.equal(risk.signals.mobile, null); assert.equal(risk.signals.abuse, null);
   rt.context.risk = risk;
   const text = await rt.run('(()=>{const a=[];appendRiskLines(a,risk);return a.join("\\n")})()');
-  assert.match(text, /商业 · 住宅 是 · 机房 是/); assert.match(text, /VPN 未知 · 代理 否 · Tor 是/);
+  assert.match(text, /Trust 85\/100 · 商业/); assert.match(text, /住宅 ✓ · 机房 ✓/); assert.match(text, /VPN \? · 代理 ✕ · Tor ✓/);
 });
 
 test('Net.Coffee: missing/wrong-type metadata never coerces objects into labels', async () => {
@@ -544,9 +547,9 @@ test('Net.Coffee: full outage isolates intelligence while every other panel sect
   const rt = runtime({ respond: q => q.url.includes('ip.net.coffee') ? null : defaultReply(q) });
   await rt.run('main()'); assert.equal(rt.done.length, 1);
   assert.match(rt.done[0].content, /IP 情报暂不可用/); assert.match(rt.done[0].content, /Test Wi-Fi/);
-  assert.match(rt.done[0].content, /系统 DNS/); assert.match(rt.done[0].content, /延迟 DIRECT/);
-  assert.match(rt.done[0].content, /流媒体 · 可达 6\/6/); assert.match(rt.done[0].content, /AI 网站 · 可达 6\/6/);
-  assert.match(rt.done[0].content, /剩余流量/); assert.match(rt.done[0].content, /下载估算/);
+  assert.match(rt.done[0].content, /DNS/); assert.match(rt.done[0].content, /⚡ DIRECT/);
+  assert.match(rt.done[0].content, /流媒体 6\/6/); assert.match(rt.done[0].content, /AI 6\/6/);
+  assert.match(rt.done[0].content, /📦/); assert.match(rt.done[0].content, /测速/);
   assert.equal(rt.calls.filter(q => q.url.includes('ip.net.coffee')).length, 1); assert.equal(rt.calls.length, 15);
 });
 
@@ -619,11 +622,11 @@ test('public IP: ordinary addresses and neighboring range boundaries stay accept
   }
 });
 
-test('release: module, script, README and technical documentation agree on 1.5.0', () => {
+test('release: module, script, README and technical documentation agree on 1.5.1', () => {
   for (const path of ['../Modules/Betty-Basic-Panel.sgmodule', '../README.md', '../docs/basic-panel.md']) {
-    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /1\.5\.0/);
+    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /1\.5\.1/);
   }
-  assert.match(SOURCE, /Version: 1\.5\.0/);
+  assert.match(SOURCE, /Version: 1\.5\.1/);
   assert.doesNotMatch(SOURCE, /countryVote|consensusGeo|function vote/);
   const intelligence = SOURCE.slice(SOURCE.indexOf('/* ---------- Same-IP'), SOURCE.indexOf('/* ---------- Website'));
   assert.deepEqual([...new Set([...intelligence.matchAll(/https:\/\/([^/"]+)/g)].map(m => m[1]))], ['ip.net.coffee']);
@@ -662,4 +665,175 @@ for (const failure of ['http', 'timeout', 'missing callback']) test(`speed regre
   assert.ok(result && result.mbps > 0, 'optional failure must preserve valid pilot');
   assert.ok(rt.now() - NOW <= 8000);
   assert.ok(rt.stats.peakSpeed <= 4);
+});
+
+
+for (const failure of ['http', 'timeout', 'body mismatch', 'body limit', 'missing callback']) test('speed: refinement workers failing after the larger check preserve the pilot: ' + failure, async () => {
+  let large = 0;
+  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) => {
+    if (bytes < 4 * 1024 * 1024 || ++large === 1) return undefined;
+    if (failure === 'http') return reply({ byteLength: 0 }, 403);
+    if (failure === 'timeout') return { error: 'operation timed out', delay: 100 };
+    if (failure === 'body mismatch') return reply({ byteLength: bytes - 1 });
+    if (failure === 'body limit') return { error: 'Response body exceeds size limit', delay: 10 };
+    return 'hang';
+  } });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.ok(large >= 2, 'fixture reaches measurement workers, not just the block check');
+  assert.ok(result.mbps > 0); assert.equal(result.state, 'fresh'); assert.equal(result.mode, '快速采样');
+  assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 4);
+  assert.ok(rt.calls.length <= 20, 'failed workers do not retry');
+  assert.equal(JSON.parse(rt.store.get(SPEED)).mbps, result.mbps);
+});
+
+test('speed: a successful late refinement check cannot discard the pilot or start a futile window', async () => {
+  const rt = runtime({ trigger: 'button', speedMbps: 500, speedReply: (q, bytes) =>
+    bytes >= 4 * 1024 * 1024 ? reply({ byteLength: bytes }, 200, {}, NOW + 7950 - q.time) : undefined });
+  const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.ok(value.mbps > 0); assert.equal(value.mode, '快速采样');
+  assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) >= 4 * 1024 * 1024).length, 1);
+  assert.ok(rt.now() - NOW <= 8000);
+});
+
+test('speed: qualified pilot samples survive another worker never calling back', async () => {
+  let blocks = 0;
+  const rt = runtime({ speedMbps: 500, latency: 100, speedReply: (q, bytes) => {
+    if (bytes === 2 * 1024 * 1024 && ++blocks >= 6) return 'hang';
+  } });
+  const value = await rt.run("runDownloadSpeedTest('')");
+  assert.ok(value.mbps > 0, 'retain completed sample window even before all workers drain');
+  assert.equal(value.mode, '快速采样'); assert.equal(rt.now() - NOW, 8000); assert.ok(rt.stats.peakSpeed <= 4);
+});
+
+for (const latency of [200, 300, 500, 900]) {
+  for (const speedMbps of [200, 800]) test('speed: medium/high bandwidth ' + speedMbps + ' Mbps at ' + latency + 'ms RTT yields a bounded estimate', async () => {
+    const rt = runtime({ trigger: 'button', speedMbps, latency });
+    const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+    assert.ok(value.mbps > 0 && value.mbps <= speedMbps, JSON.stringify(value));
+    assert.ok(rt.now() - NOW <= 8000); assert.ok(rt.stats.peakSpeed <= 4); assert.ok(rt.stats.peakTimers <= 64);
+    assert.ok(rt.calls.length <= 256);
+    assert.ok(rt.calls.reduce((sum, q) => sum + Number(new URL(q.url).searchParams.get('bytes')), 0) <= 128 * 1024 * 1024);
+  });
+}
+
+for (const status of [403, 429, 500, 503]) test('speed: explicit HTTP ' + status + ' stops without shrinking or retry storms', async () => {
+  const rt = runtime({ speedReply: () => reply({ byteLength: 0 }, status) });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.equal(result.mbps, undefined); assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, status);
+  assert.equal(rt.calls.length, 1);
+});
+
+for (const failure of ['timeout', 'transport', 'body_limit', 'body_mismatch', 'insufficient_samples']) test('speed: no valid measurement reports safe reason ' + failure, async () => {
+  const secret = 'https://private.invalid/?token=SECRET';
+  const rt = runtime({ speedReply: (q, bytes) => failure === 'timeout' ? { error: 'timed out ' + secret } :
+    failure === 'transport' ? { error: secret } :
+    failure === 'body_limit' ? { error: 'Response body exceeds size limit ' + secret } :
+    failure === 'body_mismatch' ? reply({ byteLength: 0 }) : reply({ byteLength: bytes }, 200, {}, 1) });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.equal(result.mbps, undefined); assert.equal(result.failure.reason, failure);
+  assert.ok(rt.calls.length <= 5); assert.equal(rt.store.has(SPEED), false);
+  assert.doesNotMatch(JSON.stringify([result, rt.logs, rt.writes]), /SECRET|private.invalid/);
+});
+
+for (const failure of ['body_mismatch', 'transport', 'timeout']) test('speed: bounded small-block fallback recovers ' + failure + ' after successful warmup', async () => {
+  const rt = runtime({ speedMbps: 20, speedReply: (q, bytes) => bytes <= 64 * 1024 ? undefined :
+    failure === 'body_mismatch' ? reply({ byteLength: 0 }) : { error: failure === 'timeout' ? 'timeout' : 'connection failed' } });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.ok(result.mbps > 0); assert.equal(result.mode, '小响应降级');
+  assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) > 64 * 1024).length, 1);
+  assert.ok(rt.stats.peakSpeed <= 4);
+});
+
+test('speed block: binary views/buffers, exact byte lengths, duplicate callbacks and callback exceptions', async () => {
+  const bodies = [new Uint8Array(32768), new ArrayBuffer(32768), new Uint8Array(new ArrayBuffer(65536), 0, 32768),
+    new DataView(new ArrayBuffer(65536), 0, 32768), 'x'.repeat(32768), { byteLength: 32767 }, { byteLength: 32769 },
+    { get byteLength() { throw new Error('SECRET'); } }];
+  for (let i = 0; i < bodies.length; i++) {
+    const rt = runtime({ speedReply: () => ({ body: bodies[i], status: 200, delay: 10, duplicate: true }) });
+    const value = await rt.run("(async()=>{const b={bytes:0,requests:0,closed:false,deadline:Date.now()+8000}; const r=await downloadSpeedBlock('',32768,b);return {r,b};})()");
+    assert.equal(value.r.ok, i < 4); assert.equal(value.r.bytes, i < 4 ? 32768 : 0);
+    assert.notEqual(value.b.failure?.status, 503, 'duplicate callback must not mutate the outcome');
+    assert.doesNotMatch(JSON.stringify([value, rt.logs]), /SECRET|duplicate/);
+  }
+});
+
+test('speed: late callback after total deadline cannot save or change a result', async () => {
+  const rt = runtime({ trigger: 'button', speedReply: (q, bytes) => reply({ byteLength: bytes }, 200, {}, 9000) });
+  const value = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(value.state, 'failed'); assert.equal(value.failure.reason, 'deadline');
+  assert.equal(rt.now() - NOW, 8000); assert.equal(rt.store.has(SPEED), false);
+  await rt.run('new Promise(resolve => setTimeout(resolve, 2000))');
+  assert.equal(rt.store.has(SPEED), false); assert.equal(rt.calls.length, 1);
+});
+
+for (const failStore of [true, 'throw']) test('speed: unavailable persistent protection prevents downloads', async () => {
+  const rt = runtime({ trigger: 'button', failStore });
+  const result = await rt.run("getSpeedForThisRun('', '8.8.4.4')");
+  assert.equal(result.failure.reason, 'storage'); assert.equal(rt.calls.length, 0);
+});
+
+for (const cacheIP of [IP, OTHER, '']) test('speed UI: failed fresh attempt shows historical reference without a bar: ' + (cacheIP || 'unknown exit'), async () => {
+  const rt = runtime({ trigger: 'button', failSpeed: true,
+    store: new Map([[SPEED, JSON.stringify({ mbps: 11.2, time: NOW - 60000, ip: cacheIP })]]) });
+  const text = await rt.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
+  assert.match(text, /测速失败 · 连接失败 · 上次 11.2 Mbps/);
+  assert.match(text, new RegExp(cacheIP === IP ? '同出口' : cacheIP ? '旧出口' : '出口未确认'));
+  assert.doesNotMatch(text, /[●○]|MB\/s|测速缓存/);
+});
+
+for (const cacheIP of [IP, OTHER]) test('speed UI: automatic refresh only labels cache matched to observed exit ' + cacheIP, async () => {
+  const rt = runtime({ store: new Map([[SPEED, JSON.stringify({ mbps: 312, time: NOW - 60000, ip: cacheIP })]]) });
+  const text = await rt.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
+  assert.equal(rt.calls.length, 0);
+  assert.match(text, cacheIP === IP ? /测速缓存 312.0 Mbps/ : /测速暂无当前出口结果/);
+  assert.doesNotMatch(text, /[●○]|MB\/s/); if (cacheIP !== IP) assert.doesNotMatch(text, /312/);
+});
+
+test('speed UI: uncached failure is concise; fresh success alone has a bar; cooldown is not fresh', async () => {
+  const failed = runtime({ trigger: 'button', speedReply: () => reply({ byteLength: 0 }, 403) });
+  const text = await failed.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
+  assert.equal(text, '测速失败 · HTTP 403');
+  const success = runtime({ trigger: 'button', speedMbps: 500 });
+  const first = await success.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
+  assert.match(first, /^测速 \d+\.\d Mbps · \d+\.\d MB\/s\n[●○]{10} · 500 Mbps$/);
+  const next = await success.run("(async()=>{const a=[];appendSpeedLines(a,await getSpeedForThisRun('', '8.8.4.4'));return a.join('\\n');})()");
+  assert.match(next, /测速冷却中/); assert.doesNotMatch(next, /[●○]/);
+});
+
+test('speed cache: equivalent IPv6 remains matched and quick samples round-trip without changing timestamp', async () => {
+  const rt = runtime({ store: new Map([[SPEED, JSON.stringify({ mbps: 12, time: NOW - 60000,
+    ip: '2606:4700:4700::1111', mode: '快速采样' })]]) });
+  const value = await rt.run("getSpeedForThisRun('', '2606:4700:4700:0:0:0:0:1111')");
+  assert.equal(value.otherExit, false); assert.equal(value.mode, '快速采样'); assert.equal(value.time, NOW - 60000);
+});
+
+test('compact panel: 500 is abnormal, successful GET is quiet, Taiwan uses text, traffic means remaining', async () => {
+  const rt = runtime({ network: { wifi: { ssid: '6-1904' }, v4: { primaryAddress: '192.168.1.8' }, v6: { primaryAddress: 'fe80::1' }, dns: ['192.168.1.1'] },
+    apiReply: path => path.includes('dns_delay') ? { delay: 0.024 } :
+      { profile: '# subscription-userinfo: upload=0; download=1535450808; total=322122547200; expire=1798502400' },
+    respond: q => q.url.includes('/api/ip/lookup/') ? reply(lookup(IP, { countryCode: 'TW', region: 'New Taipei City', city: 'New Taipei City', company_type: 'business' })) :
+      q.url.includes('netflix.com') ? reply('<title>Netflix</title>/title/81280792 {"countryCode":"TW"}') :
+      q.url.includes('grok.com') ? reply('', 500) :
+      q.url.includes('deepseek.com') ? reply('', 403) :
+      METHOD_FALLBACK_SITES.some(host => new URL(q.url).hostname === host) ? reply('', q.method === 'head' ? 405 : 302) : defaultReply(q) });
+  await rt.run('main()'); const text = rt.done[0].content;
+  assert.match(text, /IPv4 本地 · NAT 推断 · IPv6 本地/);
+  assert.match(text, /🚪 台湾 · 8.8.\*.\* · AS15169/);
+  assert.match(text, /Netflix 样片台湾/);
+  assert.match(text, /✨ AI 4\/6 · 受限 1 · 异常 1/); assert.match(text, /Grok 500/);
+  assert.match(text, /TikTok ✓ · Prime ✓/); assert.doesNotMatch(text, /GET 200|GET 302|未知 500|VIF|出口未测|越高越可信|单源/);
+  assert.doesNotMatch(text, /[\u{1F1E6}-\u{1F1FF}]/u);
+  assert.match(text, /📦 剩余 298.57 \/ 300 GB · 99.5%/);
+  assert.match(text, /已用 1.43 GB · 到期 12\/29/);
+  assert.equal((text.match(/Net\.Coffee/g) || []).length, 1);
+  assert.ok(text.split('\n').length <= 27);
+});
+
+test('compact panel: unknown organization/ASN is omitted and tri-state signals stay distinct', async () => {
+  const rt = runtime({ respond: q => q.url.includes('/api/ip/lookup/') ? reply(lookup(IP, {
+    asn: null, asOrganization: null, isp: null, company_name: null, region: null, city: null,
+    trust_score: null, company_type: null, isResidential: true, is_datacenter: false, is_vpn: null })) : defaultReply(q) });
+  await rt.run('main()'); const text = rt.done[0].content;
+  assert.match(text, /Trust 未知/); assert.match(text, /住宅 ✓ · 机房 ✕ · VPN \?/);
+  assert.doesNotMatch(text, /机构未知|AS未知|类型未知|越高越可信/);
 });

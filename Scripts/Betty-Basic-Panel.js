@@ -1,6 +1,6 @@
 /*
  * 贝蒂的基础面板 - Surge iOS 单 Information Panel
- * Version: 1.5.0
+ * Version: 1.5.1
  *
  * 参数：
  * POLICY = 可选；留空时所有联网检测按 Surge 当前规则执行
@@ -93,23 +93,22 @@ async function main() {
   const speed = await getSpeedForThisRun(POLICY, exit.ip);
   const media = ["Netflix", "YouTube", "Disney+", "Spotify", "TikTok", "Prime"]
     .map(function (name, i) { return Object.assign({ name: name }, results[i + 4]); });
-  const ai = ["ChatGPT", "Claude", "Gemini", "DeepSeek", "Grok", "Perplexity"]
+  const ai = ["GPT", "Claude", "Gemini", "DeepSeek", "Grok", "Perplexity"]
     .map(function (name, i) { return Object.assign({ name: name }, results[i + 10]); });
   const lines = [
     "🌐 " + shortenText(net.name, 22),
-    "IPv4 " + (parseIPv4(net.ipv4) ? "本地有" : "未发现") + " · " + inferNAT(net.ipv4),
-    formatIPv6(net.ipv6, exit.ip),
-    "系统 DNS " + detectDNS(net.dns) + " · 测试 " + fmtMs(results[1]),
-    "", "🚪 观测出口 · " + (POLICY ? "指定策略" : "当前规则"),
-    formatExitLine(exit.country, exit),
-    formatOrganizationLine(exit),
-    formatGeoLine(exit)
+    ["IPv4 " + (parseIPv4(net.ipv4) ? "本地" : "未发现"),
+      parseIPv4(net.ipv4) ? inferNAT(net.ipv4) : "", formatIPv6(net.ipv6, exit.ip)].filter(Boolean).join(" · "),
+    "DNS " + detectDNS(net.dns) + " · " + fmtMs(results[1]),
+    "", "🚪 " + formatExitLine(exit.country, exit)
   ];
-  lines.push("", "⚡ 延迟 DIRECT " + fmtMs(results[2]) + " · " +
-    (POLICY ? "指定策略 " : "当前规则 ") + fmtMs(results[3]));
+  const geoLine = formatGeoLine(exit);
+  if (geoLine) lines.push(geoLine);
+  lines.push("", "⚡ DIRECT " + fmtMs(results[2]) + " · " +
+    (POLICY ? "指定策略 " : "当前 ") + fmtMs(results[3]));
   appendSpeedLines(lines, speed);
   appendServiceLines(lines, "🎬 流媒体", media, true);
-  appendServiceLines(lines, "✨ AI 网站", ai);
+  appendServiceLines(lines, "✨ AI", ai);
   lines.push("");
   appendUsageLines(lines, results[16]);
   lines.push("");
@@ -201,11 +200,11 @@ function http(method, url, policy, options) {
       resolve(value);
     }
 
-    function failed() {
-      finish({ ok: false, status: 0, headers: {}, data: "", ms: Math.max(1, Date.now() - started) });
+    function failed(reason) {
+      finish({ ok: false, status: 0, headers: {}, data: "", reason: reason || "transport", ms: Math.max(1, Date.now() - started) });
     }
 
-    setTimeout(failed, (timeout + 2) * 1000);
+    setTimeout(function () { failed("timeout"); }, (timeout + 2) * 1000);
 
     const request = {
       url: url,
@@ -249,6 +248,7 @@ function http(method, url, policy, options) {
 
           finish({
             ok: !error && !!response,
+            reason: error ? (isTimeoutError(error) ? "timeout" : "transport") : "",
             status: Number.isFinite(status) ? status : 0,
             headers: headers,
             data: body,
@@ -436,11 +436,12 @@ async function getNetworkIntelligence(policy) {
 /* ---------- Website evidence, not account/playback promises ---------- */
 
 function reachableResult(response) {
-  if (!response || !response.ok || !response.status) return { state: "unreachable", label: "不可达" };
-  const code = response.status;
-  if (code === 401 || code === 403 || code === 429 || code === 451) return { state: "restricted", label: "受限 " + code };
+  const code = response && response.status || 0;
+  if (code === 401 || code === 403 || code === 429 || code === 451) return { state: "restricted", label: "受限 " + code, code: code };
+  if (code >= 500 && code < 600) return { state: "error", label: "异常 " + code, code: code };
+  if (!response || !response.ok || !code) return { state: "unreachable", label: response && response.reason === "timeout" ? "超时" : "不可达" };
   if (code >= 200 && code < 400) return { state: "reachable", label: "可达" };
-  return { state: "unknown", label: "未知 " + code };
+  return { state: "unknown", label: "未知 " + code, code: code };
 }
 
 async function publicPage(url, policy, host) {
@@ -463,7 +464,10 @@ async function testNetflix(policy) {
   if (first && first.ok && first.status === 200) {
     const region = netflixRegion(first.headers, first.data);
     // A regional title page proves catalogue-page access, not authenticated playback.
-    if (isNetflixTitle(first.data, "81280792")) result.label = "样片可达" + (region ? " " + flag(region) : "");
+    if (isNetflixTitle(first.data, "81280792")) {
+      result.label = "样片可达" + (region ? " " + countryLabel(region) : "");
+      result.catalogue = true; result.region = region;
+    }
     return result;
   }
   if (first && first.ok && first.status === 404) {
@@ -523,9 +527,12 @@ async function testServiceReachable(url, policy) {
   // Native timeout bounds the request; the http() watchdog bounds a missing callback.
   const get = await http("get", url, policy, { timeout: 4, autoRedirect: false, discardBody: true });
   const result = reachableResult(get);
-  const evidence = get.status ? String(get.status) + (get.ok ? "" : "/传输失败") : "无响应";
-  // Keep the actual fallback result visible for phone diagnosis; never log raw errors.
-  result.label += " (GET " + evidence + ")";
+  // Successful method fallback is ordinary reachability; retain only failed evidence.
+  if (result.state !== "reachable") {
+    const evidence = get.status ? String(get.status) + (get.ok ? "" : "/传输失败") : result.label;
+    result.fallback = evidence;
+    result.label += " (GET " + evidence + ")";
+  }
   return result;
 }
 
@@ -535,70 +542,93 @@ function testAIReachable(url, policy) { return testServiceReachable(url, policy)
 
 async function getSpeedForThisRun(policy, ip) {
   const previous = readSpeedResult();
-  if (previous) previous.otherExit = !previous.ip || !ip || previous.ip !== normalizeIP(ip);
+  if (previous) {
+    previous.otherExit = !previous.ip || !ip || previous.ip !== normalizeIP(ip);
+    previous.exitUnknown = !previous.ip || !ip;
+    previous.state = "cached";
+  }
   if (typeof $trigger !== "string" || $trigger !== "button") return previous;
   // Protect against simultaneous button invocations and rapid repeated taps.
   const lockKey = "betty.basic.speed.lock";
   const lock = readJSON(lockKey);
   if (lock && finiteInRange(lock.until, Date.now() + 1, Date.now() + 30000)) {
-    return previous ? Object.assign(previous, { notice: "测速进行中 / 冷却" }) : { notice: "测速进行中 / 冷却" };
+    return Object.assign(previous || {}, { state: "cooldown", failure: { reason: "cooldown" } });
   }
-  if (!writeJSON(lockKey, { until: Date.now() + 15000 })) return previous ? Object.assign(previous, { notice: "未测速：本地保护不可用" }) : null;
+  if (!writeJSON(lockKey, { until: Date.now() + 15000 })) {
+    return Object.assign(previous || {}, { state: "failed", failure: { reason: "storage" } });
+  }
   const fresh = await runDownloadSpeedTest(policy);
-  if (!fresh) return previous ? Object.assign(previous, { notice: "本次失败 · 保留上次结果" }) : { notice: "本次测速未取得有效样本" };
+  if (!fresh.mbps) return Object.assign(previous || {}, { state: "failed", failure: fresh.failure });
   fresh.ip = normalizeIP(ip);
+  fresh.state = "fresh";
   saveSpeedResult(fresh);
   return fresh;
 }
 
 async function runDownloadSpeedTest(policy) {
-  const budget = { bytes: 0, requests: 0, closed: false, deadline: Date.now() + SPEED_TOTAL_TIMEOUT_MS };
+  const budget = { bytes: 0, requests: 0, closed: false, deadline: Date.now() + SPEED_TOTAL_TIMEOUT_MS,
+    best: null, partial: null, failure: null };
   // Only one overall watchdog plus one per measurement stage. Per-block timers can
   // exceed Surge's 64 pending timer limit on JSC (which may have no clearTimeout).
   return new Promise(function (resolve) {
     let settled = false;
-    function finish(result) {
+    function finish(result, reason) {
       if (settled) return;
       settled = true; budget.closed = true;
-      resolve(result);
+      const measurement = result || budget.best || budget.partial;
+      resolve(measurement ? Object.assign({}, measurement, { requestedBytes: budget.bytes }) :
+        { failure: reason || budget.failure || { reason: "insufficient_samples" } });
     }
-    setTimeout(function () { finish(null); }, SPEED_TOTAL_TIMEOUT_MS);
-    adaptiveDownload(policy, budget).then(finish, function () { finish(null); });
+    setTimeout(function () { finish(null, { reason: "deadline" }); }, SPEED_TOTAL_TIMEOUT_MS);
+    adaptiveDownload(policy, budget).then(function (result) { finish(result); },
+      function () { finish(null, { reason: "transport" }); });
   });
 }
 
 async function adaptiveDownload(policy, budget) {
   const warmup = await downloadSpeedBlock(policy, SPEED_WARMUP_BYTES, budget);
-  if (budget.closed) return null;
+  if (budget.closed || warmup.reason === "http") return null;
   const probe = await downloadSpeedBlock(policy, 512 * 1024, budget);
   let block = probe.ok ? 512 * 1024 : 0;
-  if (!block && (probe.sizeLimitDetected || probe.incompleteBody)) {
+  // Small blocks help body/transport failures, not explicit HTTP/WAF rejections.
+  // At most three fallback probes, then stop; never loop on a failed worker.
+  if (!block && (probe.reason === "body_limit" || probe.reason === "body_mismatch" ||
+      (warmup.ok && (probe.reason === "transport" || probe.reason === "timeout")))) {
     for (let i = 0; i < SPEED_SAFE_BLOCK_SIZES.length && !budget.closed; i++) {
       const safe = await downloadSpeedBlock(policy, SPEED_SAFE_BLOCK_SIZES[i], budget);
       if (safe.ok) { block = SPEED_SAFE_BLOCK_SIZES[i]; break; }
+      if (safe.reason === "http" || safe.reason === "deadline") break;
     }
   }
   if (!block || budget.closed) return null;
-  // Timing difference is used ONLY to choose a larger pilot sample, never to correct
-  // the displayed speed. Warmup includes setup overhead, so this is intentionally permissive.
+  // Timing difference only chooses sample size; it never corrects the displayed rate.
   if (block >= 512 * 1024 && warmup.ok && probe.elapsed - warmup.elapsed < 30) {
     const larger = await downloadSpeedBlock(policy, 2 * 1024 * 1024, budget);
     if (larger.ok) block = 2 * 1024 * 1024;
+    else if (larger.reason === "http") return null;
   }
   const pilot = await measureDownload(policy, block, 1500, 16 * 1024 * 1024, budget, false, 100);
   if (!pilot) return null;
+  budget.best = speedMeasurementResult(pilot, budget, block < 512 * 1024 ? "小响应降级" : "快速采样");
   const tier = pilot.mbps > 300 ? "high" : pilot.mbps >= 150 ? "medium" : "low";
-  // A small-body fallback is latency-limited; never turn its result into a capacity claim.
   if (tier === "low" || block < 512 * 1024) {
-    if (pilot.elapsed < SPEED_MIN_MEASURE_MS) return null;
-    return speedMeasurementResult(pilot, budget, block < 512 * 1024 ? "小响应降级" : "低速采样");
+    if (block >= 512 * 1024 && pilot.elapsed >= SPEED_MIN_MEASURE_MS && !pilot.partial) budget.best.mode = "低速采样";
+    return budget.best;
   }
+  // Refinement is optional. Leave room for a useful window and request latency.
+  const reserve = Math.max(SPEED_MIN_MEASURE_MS, warmup.elapsed * 2);
+  if (budget.deadline - Date.now() < SPEED_MIN_MEASURE_MS + reserve) return budget.best;
   const desired = tier === "high" ? 8 * 1024 * 1024 : 4 * 1024 * 1024;
   const check = await downloadSpeedBlock(policy, desired, budget);
-  if (check.ok) block = desired;
-  const result = await measureDownload(policy, block, tier === "high" ? 4000 : 3000,
-    tier === "high" ? SPEED_MAX_TOTAL_BYTES : 64 * 1024 * 1024, budget, tier === "medium" && check.ok, SPEED_MIN_MEASURE_MS);
-  return result ? speedMeasurementResult(result, budget, result.upgraded || tier === "high" ? "高速采样" : "中速采样") : null;
+  if (!check.ok || budget.closed) return budget.best;
+  block = desired;
+  const duration = Math.min(tier === "high" ? 4000 : 3000, budget.deadline - Date.now() - reserve);
+  if (duration < SPEED_MIN_MEASURE_MS) return budget.best;
+  const result = await measureDownload(policy, block, duration,
+    tier === "high" ? SPEED_MAX_TOTAL_BYTES : 64 * 1024 * 1024, budget, tier === "medium", SPEED_MIN_MEASURE_MS);
+  return result && !result.partial
+    ? speedMeasurementResult(result, budget, result.upgraded || tier === "high" ? "高速采样" : "中速采样")
+    : budget.best;
 }
 
 function speedMeasurementResult(result, budget, mode) {
@@ -608,22 +638,24 @@ function speedMeasurementResult(result, budget, mode) {
 
 function measureDownload(policy, block, duration, cap, budget, adaptive, minimumMS) {
   const started = Date.now();
-  const state = { bytes: 0, sent: 0, samples: 0, failures: 0, attempted: 0,
+  const state = { bytes: 0, sent: 0, samples: 0, attempted: 0, lastValid: null,
     block: block, cap: cap, stop: Math.min(budget.deadline, started + duration), active: true, upgraded: false };
   return new Promise(function (resolve) {
     let settled = false;
+    function sample() {
+      const elapsed = Math.max(1, Math.min(Date.now(), state.stop) - started);
+      const good = elapsed >= minimumMS && state.samples >= SPEED_MIN_SUCCESS_SAMPLES &&
+        state.bytes >= SPEED_MIN_SUCCESS_BYTES && state.samples / Math.max(1, state.attempted) >= SPEED_MIN_SUCCESS_RATIO;
+      return good ? { mbps: state.bytes * 8 / elapsed / 1000, elapsed: elapsed, upgraded: state.upgraded } : null;
+    }
     function finish() {
       if (settled) return;
-      settled = true;
-      state.active = false;
-      const elapsed = Math.max(1, Math.min(Date.now(), state.stop) - started);
-      const good = !budget.closed && elapsed >= minimumMS && state.samples >= SPEED_MIN_SUCCESS_SAMPLES &&
-        state.bytes >= SPEED_MIN_SUCCESS_BYTES && state.samples / Math.max(1, state.attempted) >= SPEED_MIN_SUCCESS_RATIO;
-      resolve(good ? { mbps: state.bytes * 8 / elapsed / 1000, elapsed: elapsed, upgraded: state.upgraded } : null);
+      settled = true; state.active = false;
+      const result = sample();
+      resolve(result || (state.lastValid ? Object.assign({}, state.lastValid, { partial: true }) : null));
     }
-    // Stop scheduling at the window limit, then drain the existing workers before
-    // another stage. Resolving early would allow old + new workers to exceed four.
-    // The overall watchdog still bounds a callback that never arrives.
+    // Drain existing workers before another stage; resolving early can exceed four.
+    // Save qualified completed samples so the overall watchdog cannot discard them.
     setTimeout(function () { state.active = false; }, Math.max(1, Math.min(budget.deadline - started, adaptive ? 4000 : duration)));
     async function worker() {
       while (state.active && !budget.closed && Date.now() < state.stop) {
@@ -633,11 +665,17 @@ function measureDownload(policy, block, duration, cap, budget, adaptive, minimum
         const response = await downloadSpeedBlock(policy, bytes, budget);
         if (!state.active || budget.closed) return;
         if (response.ok && Date.now() <= state.stop) { state.bytes += response.bytes; state.samples++; }
-        else { state.failures++; return; } // No loop of immediate failures / WAF responses.
+        else {
+          if (response.reason === "http") state.active = false;
+          return;
+        }
+        const current = sample();
+        if (current) {
+          state.lastValid = current;
+          if (!budget.best) budget.partial = speedMeasurementResult(current, budget, block < 512 * 1024 ? "小响应降级" : "快速采样");
+        }
         const elapsed = Date.now() - started;
         if (adaptive && !state.upgraded && elapsed >= 500 && state.bytes * 8 / elapsed / 1000 > 300) {
-          // Keep the already-probed 4 MiB block; improve high-speed confidence by
-          // extending duration and byte budget, without guessing a new body limit.
           state.upgraded = true; state.cap = SPEED_MAX_TOTAL_BYTES;
           state.stop = Math.min(budget.deadline, started + 4000);
         }
@@ -652,8 +690,16 @@ function measureDownload(policy, block, duration, cap, budget, adaptive, minimum
 function downloadSpeedBlock(policy, blockBytes, budget) {
   return new Promise(function (resolve) {
     const started = Date.now(), remaining = budget.deadline - started;
-    const failed = { ok: false, bytes: 0, elapsed: 0, sizeLimitDetected: false, incompleteBody: false };
-    if (budget.closed || remaining <= 0 || budget.bytes + blockBytes > SPEED_MAX_TOTAL_BYTES || budget.requests >= 256) { resolve(failed); return; }
+    let settled = false;
+    function finish(reason, status, bytes) {
+      if (settled) return;
+      settled = true;
+      if (reason) budget.failure = { reason: reason, status: status || 0 };
+      resolve({ ok: !reason, bytes: reason ? 0 : bytes, elapsed: Math.max(1, Date.now() - started),
+        reason: reason || "", status: status || 0 });
+    }
+    if (budget.closed || remaining <= 0) { finish("deadline"); return; }
+    if (budget.bytes + blockBytes > SPEED_MAX_TOTAL_BYTES || budget.requests >= 256) { finish("insufficient_samples"); return; }
     budget.bytes += blockBytes; budget.requests++;
     const request = {
       url: "https://speed.cloudflare.com/__down?bytes=" + blockBytes + "&_=" + started + "-" + budget.requests,
@@ -664,15 +710,28 @@ function downloadSpeedBlock(policy, blockBytes, budget) {
     if (clean(policy)) request.policy = clean(policy);
     try {
       $httpClient.get(request, function (error, response, data) {
-        const status = response ? Number(response.status !== undefined ? response.status : response.statusCode) : 0;
-        const bytes = binaryLength(data), elapsed = Math.max(1, Date.now() - started);
-        const ok = !budget.closed && Date.now() <= budget.deadline && !error && status >= 200 && status < 300 && bytes === blockBytes && elapsed >= SPEED_MIN_SAMPLE_MS;
-        resolve({ ok: ok, bytes: ok ? bytes : 0, elapsed: elapsed,
-          sizeLimitDetected: isResponseBodySizeLimitError(error),
-          incompleteBody: !error && status >= 200 && status < 300 && bytes > 0 && bytes < blockBytes });
+        if (settled) return;
+        try {
+          const status = response ? Number(response.status !== undefined ? response.status : response.statusCode) : 0;
+          if (budget.closed || Date.now() > budget.deadline) { finish("deadline"); return; }
+          if (status >= 300 || (status > 0 && status < 200)) { finish("http", status); return; }
+          if (error) { finish(isResponseBodySizeLimitError(error) ? "body_limit" : isTimeoutError(error) ? "timeout" : "transport"); return; }
+          if (!(status >= 200 && status < 300)) { finish("transport"); return; }
+          const bytes = binaryLength(data);
+          if (bytes !== blockBytes) { finish("body_mismatch"); return; }
+          if (Date.now() - started < SPEED_MIN_SAMPLE_MS) { finish("insufficient_samples"); return; }
+          finish("", status, bytes);
+        } catch (_) { finish("transport"); }
       });
-    } catch (error) { resolve(Object.assign({}, failed, { sizeLimitDetected: isResponseBodySizeLimitError(error) })); }
+    } catch (error) {
+      finish(isResponseBodySizeLimitError(error) ? "body_limit" : isTimeoutError(error) ? "timeout" : "transport");
+    }
   });
+}
+
+function isTimeoutError(error) {
+  const text = typeof error === "string" ? error : error && typeof error === "object" ? clean(error.message || error.error || error.localizedDescription) : "";
+  return /timed?\s*out|timeout/i.test(text);
 }
 
 function isResponseBodySizeLimitError(error) {
@@ -696,7 +755,7 @@ function readSpeedResult() {
   const saved = readJSON(SPEED_KEY);
   if (!saved || !finiteInRange(saved.mbps, 0.001, 100000) || !finiteInRange(saved.time, 1, Date.now())) return null;
   return { mbps: Number(saved.mbps), mbPerSecond: Number(saved.mbps) / 8, time: Number(saved.time),
-    ip: normalizeIP(saved.ip), mode: ["低速采样", "中速采样", "高速采样", "小响应降级"].indexOf(saved.mode) >= 0 ? saved.mode : "" };
+    ip: normalizeIP(saved.ip), mode: ["低速采样", "中速采样", "高速采样", "小响应降级", "快速采样"].indexOf(saved.mode) >= 0 ? saved.mode : "" };
 }
 
 function saveSpeedResult(result) {
@@ -1158,7 +1217,7 @@ function detectDNS(list) {
 function inferNAT(local) {
   if (!parseIPv4(local)) return "NAT 未测";
   if (isCGNAT(local)) return "CGNAT 候选";
-  if (isPrivateIPv4(local)) return "私网 / NAT 推断";
+  if (isPrivateIPv4(local)) return "NAT 推断";
   return "NAT 未测";
 }
 
@@ -1244,114 +1303,112 @@ function formatIPv6(local, exitIP) {
   const hasLocal = !!found && found.indexOf(":") >= 0 && found !== "::";
   // The public HTTP API exposes profile text, not a merged effective VIF setting.
   // Modules can override that text. No reliable effective-VIF claim is possible here.
-  return "IPv6 本地" + (hasLocal ? "有" : "未发现") + " · VIF 未知\n" +
-    (normalizeIP(exitIP).indexOf(":") >= 0 ? "观测出口 IPv6 可达" : "IPv6 出口未测");
+  return [hasLocal ? "IPv6 本地" : "", normalizeIP(exitIP).indexOf(":") >= 0 ? "IPv6 出口 ✓" : ""].filter(Boolean).join(" · ");
 }
 
 /* ---------- UI ---------- */
 
 function appendSpeedLines(lines, speed) {
-  if (!speed || !speed.mbps) {
-    lines.push("下载估算 · " + (speed && speed.notice ? speed.notice : "未测试（点刷新测速）"));
+  const hasValue = speed && finiteInRange(speed.mbps, 0.001, 100000);
+  if (hasValue && speed.state === "fresh") {
+    lines.push("测速 " + formatFixed(speed.mbps, 1) + " Mbps · " + formatFixed(speed.mbps / 8, 1) + " MB/s");
+    lines.push(speedResultBar(speed.mbps) +
+      (speed.mode === "快速采样" || speed.mode === "小响应降级" ? " · " + speed.mode : ""));
     return;
   }
-  lines.push("下载估算 " + formatFixed(speed.mbps, 1) + " Mbps · " + formatFixed(speed.mbPerSecond, 2) + " MB/s");
-  lines.push(speedResultBar(speed.mbps));
-  lines.push("上次 " + dateLabel(new Date(speed.time)) + " " + timeLabel(new Date(speed.time)) + (speed.mode ? " · " + speed.mode : ""));
-  if (speed.otherExit) lines.push("历史结果 · 当前出口未匹配");
-  if (speed.notice) lines.push(speed.notice);
+  if (speed && (speed.state === "failed" || speed.state === "cooldown")) {
+    let text = speed.state === "cooldown" ? "测速冷却中" : "测速失败 · " + speedFailureLabel(speed.failure);
+    if (hasValue) text += " · 上次 " + formatFixed(speed.mbps, 1) + " Mbps（" + speedTimeLabel(speed.time) +
+      (speed.otherExit ? speed.exitUnknown ? " · 出口未确认" : " · 旧出口" : " · 同出口") + "）";
+    lines.push(text);
+    return;
+  }
+  if (hasValue && !speed.otherExit) {
+    lines.push("测速缓存 " + formatFixed(speed.mbps, 1) + " Mbps · " + speedTimeLabel(speed.time));
+  } else {
+    lines.push(hasValue ? "测速暂无当前出口结果" : "测速未测 · 点刷新");
+  }
+}
+
+function speedFailureLabel(failure) {
+  const reason = failure && failure.reason;
+  if (reason === "http" && finiteInRange(failure.status, 100, 599)) return "HTTP " + failure.status;
+  return ({ timeout: "超时", deadline: "超时", body_limit: "响应上限", body_mismatch: "响应不完整",
+    insufficient_samples: "样本不足", transport: "连接失败", storage: "本地保护不可用", cooldown: "冷却中" })[reason] || "连接失败";
+}
+
+function speedTimeLabel(time) {
+  const date = new Date(time), now = new Date();
+  return (dateLabel(date) === dateLabel(now) ? "" : date.getFullYear() === now.getFullYear()
+    ? twoDigits(date.getMonth() + 1) + "/" + twoDigits(date.getDate()) + " " : dateLabel(date) + " ") + timeLabel(date);
 }
 
 function speedResultBar(mbps) {
   // Linear display scale only. 500 Mbps fills the bar; the number is never capped.
   const filled = clamp(Math.round(Number(mbps) / SPEED_BAR_MAX_MBPS * SPEED_BAR_SEGMENTS), 0, SPEED_BAR_SEGMENTS);
-  return "●".repeat(filled) + "○".repeat(SPEED_BAR_SEGMENTS - filled) + " · 满格 500 Mbps";
+  return "●".repeat(filled) + "○".repeat(SPEED_BAR_SEGMENTS - filled) + " · 500 Mbps";
 }
 
 function appendUsageLines(lines, usage) {
-  lines.push("📦 剩余流量");
-  if (!usage || !usage.available) {
-    lines.push("当前配置未提供流量信息");
-    return;
-  }
-
-  const hasCompleteData = nonNegativeTrafficNumber(usage.used) !== null &&
-    positiveTrafficNumber(usage.total) !== null &&
-    nonNegativeTrafficNumber(usage.remaining) !== null &&
-    nonNegativeTrafficNumber(usage.remainingPercent) !== null;
-
-  if (hasCompleteData) {
-    lines.push("已用 " + formatTrafficBytes(usage.used) + " / " + formatTrafficBytes(usage.total));
-    lines.push(
-      "剩余 " + formatTrafficBytes(usage.remaining) +
-      " · " + formatFixed(usage.remainingPercent, 1) + "%"
-    );
-  } else if (nonNegativeTrafficNumber(usage.remaining) !== null) {
-    lines.push("剩余 " + formatTrafficBytes(usage.remaining));
-    lines.push(
-      "总量 " + (positiveTrafficNumber(usage.total) !== null
-        ? formatTrafficBytes(usage.total)
-        : "未提供")
-    );
-  } else {
-    lines.push("当前配置未提供流量信息");
-    return;
-  }
-
-  if (usage.expireState === "permanent") {
-    lines.push("到期 永久");
-  } else if (usage.expireState === "date" && usage.expireValue) {
-    lines.push("到期 " + dateLabel(usage.expireValue));
-  } else {
-    lines.push("到期 未提供");
-  }
+  if (!usage || !usage.available) { lines.push("📦 当前配置未提供流量信息"); return; }
+  const remaining = nonNegativeTrafficNumber(usage.remaining);
+  if (remaining === null) { lines.push("📦 当前配置未提供流量信息"); return; }
+  const total = positiveTrafficNumber(usage.total);
+  let left = formatTrafficBytes(remaining), right = total === null ? "总量未提供" : formatTrafficBytes(total);
+  if (total !== null && left.split(" ").pop() === right.split(" ").pop()) left = left.split(" ")[0];
+  lines.push("📦 剩余 " + left + " / " + right +
+    (nonNegativeTrafficNumber(usage.remainingPercent) !== null ? " · " + formatFixed(usage.remainingPercent, 1) + "%" : ""));
+  const used = nonNegativeTrafficNumber(usage.used);
+  const expiry = usage.expireState === "permanent" ? "永久" :
+    usage.expireState === "date" && usage.expireValue ? dateLabel(usage.expireValue) : "未提供";
+  const shortExpiry = expiry.indexOf(String(new Date().getFullYear()) + "/") === 0 ? expiry.slice(5) : expiry;
+  lines.push((used === null ? "" : "已用 " + formatTrafficBytes(used) + " · ") + "到期 " + shortExpiry);
 }
 
 function formatExitLine(countryCode, exit) {
-  const ipText = displayIP(exit && exit.ip) || "出口 IP 未识别";
-  return flag(countryCode) + " " + countryLabel(countryCode) + " · " + ipText;
+  if (!exit || !exit.ip) return "IP 情报暂不可用";
+  const asn = positiveASN(exit.asn);
+  return [normalizeCountryCode(countryCode) ? countryLabel(countryCode) : "",
+    displayIP(exit.ip), asn ? "AS" + asn : ""].filter(Boolean).join(" · ");
 }
 
-function formatOrganizationLine(exit) {
-  const org = shortenText(shortenISP(exit && exit.org), 20) || "机构未知";
-  const asn = positiveASN(exit && exit.asn);
-  return org + (asn ? " · AS" + asn : "");
-}
-
-function appendServiceLines(lines, title, items, showFailures) {
+function appendServiceLines(lines, title, items) {
   const reachable = items.filter(function (i) { return i.state === "reachable"; }).length;
-  const restricted = items.filter(function (i) { return i.state === "restricted"; }).length;
-  let summary = title + " · 可达 " + reachable + "/" + items.length;
-  if (!showFailures || restricted) summary += " · 受限 " + restricted;
-  if (showFailures) {
-    const unreachable = items.filter(function (i) { return i.state === "unreachable"; }).length;
-    const unknown = items.filter(function (i) { return i.state === "unknown"; }).length;
-    if (unreachable) summary += " · 不达 " + unreachable;
-    if (unknown) summary += " · 未知 " + unknown;
-  }
+  let summary = title + " " + reachable + "/" + items.length;
+  [["restricted", "受限"], ["error", "异常"], ["unreachable", "不达"], ["unknown", "未知"]].forEach(function (pair) {
+    const count = items.filter(function (item) { return item.state === pair[0]; }).length;
+    if (count) summary += " · " + pair[1] + " " + count;
+  });
   lines.push("", summary);
-  for (let i = 0; i < items.length; i += 2) lines.push(items.slice(i, i + 2).map(function (item) {
-    return item.name + " " + item.label;
+  for (let i = 0; i < items.length; i += 3) lines.push(items.slice(i, i + 3).map(function (item) {
+    let label = item.label;
+    if (item.state === "reachable") {
+      label = item.catalogue ? "样片" + (item.region ? countryLabel(item.region) : "✓") :
+        item.premium === false ? "✓/Premium受限" : item.premium === true ? "✓/报价" : "✓";
+    } else if (item.fallback) label = "GET " + item.fallback;
+    else if (item.code) label = String(item.code);
+    return item.name + " " + label;
   }).join(" · "));
 }
 
 function formatGeoLine(exit) {
-  if (!exit.ip || !hasGeo(exit)) return "IP 情报暂不可用 · Net.Coffee";
+  if (!exit.ip) return "";
+  if (!hasGeo(exit)) return "IP 情报暂不可用";
   const place = [exit.region, exit.city].filter(Boolean).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(" / ");
-  return "Net.Coffee · 单源" + (place ? " · " + shortenText(place, 36) : "");
+  return [shortenText(shortenISP(exit.org), 20), shortenText(place, 26)].filter(Boolean).join(" · ");
 }
 
-function signalState(value) { return value === true ? "是" : value === false ? "否" : "未知"; }
+function signalState(value) { return value === true ? "✓" : value === false ? "✕" : "?"; }
 
 function appendRiskLines(lines, risk) {
-  lines.push("🛡 IP 信誉" + (ENABLE_RISK ? " · Net.Coffee" : " · 已关闭"));
-  if (!ENABLE_RISK) return;
-  if (!risk.ip || !hasRisk(risk)) { lines.push("暂不可用" + (risk.reason ? " · " + risk.reason : "")); return; }
+  if (!ENABLE_RISK) { lines.push("🛡 IP 信誉 · 已关闭 · Net.Coffee"); return; }
+  if (!risk.ip || !hasRisk(risk)) { lines.push("🛡 IP 情报暂不可用 · Net.Coffee" + (risk.reason ? " · " + risk.reason : "")); return; }
   const s = risk.signals;
-  lines.push("Trust " + (risk.trust === null ? "未知" : risk.trust + "/100") + " · 越高越可信");
   const types = { isp: "ISP", hosting: "托管", business: "商业", education: "教育", government: "政府", banking: "银行" };
-  lines.push((types[risk.type] || "类型未知") + " · 住宅 " + signalState(s.residential) + " · 机房 " + signalState(s.hosting));
-  lines.push("VPN " + signalState(s.vpn) + " · 代理 " + signalState(s.proxy) + " · Tor " + signalState(s.tor));
+  lines.push("🛡 Trust " + (risk.trust === null ? "未知" : risk.trust + "/100") +
+    (types[risk.type] ? " · " + types[risk.type] : "") + " · Net.Coffee");
+  lines.push("住宅 " + signalState(s.residential) + " · 机房 " + signalState(s.hosting) +
+    " · VPN " + signalState(s.vpn) + " · 代理 " + signalState(s.proxy) + " · Tor " + signalState(s.tor));
   const extra = [["abuse", "滥用记录"], ["mobile", "移动网络"], ["crawler", "爬虫"]]
     .filter(function (pair) { return s[pair[0]] === true; }).map(function (pair) { return pair[1]; });
   if (extra.length) lines.push(extra.join(" / "));
@@ -1378,13 +1435,6 @@ function normalizeCountryCode(code) {
   if (typeof code !== "string") return "";
   const value = clean(code).toUpperCase();
   return /^[A-Z]{2}$/.test(value) && value !== "XX" && value !== "ZZ" ? value : "";
-}
-
-function flag(code) {
-  const value = normalizeCountryCode(code);
-  if (!value) return "🌐";
-  return String.fromCodePoint(value.charCodeAt(0) + 127397) +
-         String.fromCodePoint(value.charCodeAt(1) + 127397);
 }
 
 function countryLabel(code) {
