@@ -42,3 +42,7 @@ jobs:
 
       - name: Check script syntax
         run: for script in Scripts/*.js; do node --check "$script"; done
+
+      - name: Probe Net.Coffee public contract
+        if: github.event_name == 'pull_request'
+        run: node scripts/probe-net-coffee.mjs
