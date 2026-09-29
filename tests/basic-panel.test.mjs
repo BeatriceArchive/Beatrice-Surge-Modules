@@ -948,3 +948,22 @@ test('sampler: watchdog closes admission; late successes cannot change an alread
   await rt.run('new Promise(resolve => setTimeout(resolve, 10000))');
   assert.equal(rt.store.get(SPEED), saved); assert.equal(rt.calls.length, count);
 });
+
+for (const cap of [512 * 1024, 2 * MiB]) {
+  for (const reason of ['body_limit', 'body_mismatch']) test('sampler: short complete ' + cap + '-byte blocks survive a larger ' + reason, async () => {
+    const rt = runtime({ speedMbps: 500, latency: 20, speedReply: (q, bytes) => bytes > cap
+      ? reason === 'body_limit' ? { error: 'Response body exceeds size limit' } : reply({ byteLength: bytes - 1 })
+      : undefined });
+    const result = await rt.run("runDownloadSpeedTest('')");
+    assert.equal(result.mode, '小响应降级'); assert.ok(result.mbps > 0 && result.mbps <= 500);
+    assert.ok(result.elapsed >= 100); assert.equal(rt.stats.peakSpeed, 1);
+    assert.equal(rt.calls.filter(q => Number(new URL(q.url).searchParams.get('bytes')) > cap).length, 1);
+    assert.ok(rt.calls.length <= 14); assert.ok(speedBytes(rt) <= 64 * MiB);
+  });
+}
+test('sampler: a short earlier block never causes retries after an explicit HTTP rejection', async () => {
+  const rt = runtime({ speedMbps: 500, speedReply: (q, bytes) => bytes >= 2 * MiB ? reply({ byteLength: 0 }, 403) : undefined });
+  const result = await rt.run("runDownloadSpeedTest('')");
+  assert.equal(result.failure.reason, 'http'); assert.equal(result.failure.status, 403);
+  assert.equal(rt.calls.length, 3);
+});

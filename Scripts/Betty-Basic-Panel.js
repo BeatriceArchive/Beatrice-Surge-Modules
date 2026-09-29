@@ -602,6 +602,11 @@ async function adaptiveDownload(policy, budget) {
     if (budget.closed) return budget.best;
     if (!next.ok) {
       if (budget.best) return budget.best;
+      // A working block may be too brief on its own. If only the larger body is
+      // rejected/truncated, accumulate that known-good size instead of discarding it.
+      if (sample && (next.reason === "body_limit" || next.reason === "body_mismatch")) {
+        return smallDownload(policy, budget, sample);
+      }
       if (i === 0 && (next.reason === "body_limit" || next.reason === "body_mismatch" ||
           (warmup.ok && (next.reason === "transport" || next.reason === "timeout")))) {
         return smallDownload(policy, budget);
@@ -668,11 +673,10 @@ async function measureDownload(policy, block, count, budget) {
   return budget.best;
 }
 
-async function smallDownload(policy, budget) {
-  // Only before a large result exists. At most three shrinking probes; explicit
-  // HTTP errors stop immediately. Complete small bodies are then sampled serially.
-  let sample = null;
-  for (let i = 0; i < SPEED_SAFE_BLOCK_SIZES.length && !budget.closed; i++) {
+async function smallDownload(policy, budget, sample) {
+  // Only before a qualified result exists. Reuse a complete known-good block or
+  // try at most three shrinking probes; explicit HTTP errors stop immediately.
+  for (let i = 0; !sample && i < SPEED_SAFE_BLOCK_SIZES.length && !budget.closed; i++) {
     const response = await downloadSpeedBlock(policy, SPEED_SAFE_BLOCK_SIZES[i], budget);
     if (response.ok) { sample = response; break; }
     if (response.reason === "http" || response.reason === "deadline") return null;
