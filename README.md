@@ -11,7 +11,7 @@
 | 模块 | 当前用途 | 版本 / 状态 |
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
-| `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.1 |
+| `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.2 |
 | `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.10.0 |
 | `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.0 |
 
@@ -68,7 +68,7 @@ YS=1&RISK=1
 - Netflix、YouTube、Disney+、Spotify、TikTok、Prime 入口可达性
 - ChatGPT、Claude、Gemini、DeepSeek、Grok、Perplexity 可达性
 - 当前 Profile 流量信息
-- 仅手动点击刷新时执行的自适应下载估算；8 秒内保留有效初测，精测失败回退为“快速采样”
+- 仅手动点击刷新时执行下载估算；顺序放大样本、最多双请求确认，8 秒 / 64 MiB 上限；可选阶段失败仍保留有效“快速采样”
 - 紧凑布局、文字地区、异常状态码；历史测速只作参考，不显示为本次结果
 
 重要边界：

@@ -37,9 +37,6 @@ jobs:
       - name: Validate public Config and Modules contract
         run: node scripts/validate-config-contract.mjs Beatrice-Surge-Config/Beatrice-Surge.conf Modules/Beatrice-Surge-System.sgmodule
 
-      - name: Probe public speed endpoint contract (temporary)
-        run: node scripts/probe-speed-contract.mjs
-
       - name: Run isolated behavior tests
         run: node --test tests/*.test.mjs
 
