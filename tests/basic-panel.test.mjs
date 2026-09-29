@@ -495,7 +495,8 @@ test('cache: expired data and failed fresh discovery never become stale fallback
   const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
   const missing = runtime({ store, clockStart: NOW + 1000, respond: () => null });
   const result = await missing.run("getNetworkIntelligence('')"); assert.equal(result.exit.ip, ''); assert.equal(result.risk.ip, ''); assert.equal(missing.calls.length, 1);
-  const expired = runtime({ store, clockStart: NOW + 3600001, respond: q => q.url.includes('/cdn-cgi/trace') ? defaultReply(q) : null });
+  const expires = JSON.parse(store.get(INTEL)).entries.risk.time + 3600000;
+  const expired = runtime({ store, clockStart: expires + 1, respond: q => q.url.includes('/cdn-cgi/trace') ? defaultReply(q) : null });
   const value = await expired.run("getNetworkIntelligence('')");
   assert.equal(value.exit.ip, IP); assert.equal(value.exit.country, ''); assert.equal(value.risk.ip, '');
   assert.deepEqual(Object.keys(JSON.parse(store.get(INTEL)).entries), []);
@@ -515,7 +516,8 @@ for (const field of ['signals', 'trust', 'countryName', 'time']) test('cache: in
   const rt = runtime({ store, clockStart: NOW + 1000 }); await rt.run("getNetworkIntelligence('')"); assert.equal(rt.calls.length, 2);
 });
 
-for (const [header, wait] of [['120', 120000], [new Date(NOW + 300000).toUTCString(), 300000], ['', 86400000], ['nonsense', 86400000]]) test('Net.Coffee: 429 Retry-After ' + header, async () => {
+for (const [header, wait] of [['120', 120000], ['0', 60000], ['1', 60000], ['999999999', 7 * 86400000],
+  [new Date(NOW - 1000).toUTCString(), 60000], [new Date(NOW + 300000).toUTCString(), 300000], ['', 86400000], ['nonsense', 86400000]]) test('Net.Coffee: 429 Retry-After ' + header, async () => {
   const store = new Map();
   const first = runtime({ store, respond: q => q.url.includes('/api/ip/lookup/') ? reply({}, 429, { 'Retry-After': header }) : defaultReply(q) });
   await first.run("getNetworkIntelligence('')");
@@ -588,7 +590,7 @@ const NON_PUBLIC = [
   '169.254.1.1', '172.16.0.1', '172.31.255.255', '192.0.0.0', '192.0.0.8', '192.0.0.11', '192.0.0.255',
   '192.0.2.0', '192.0.2.1', '192.0.2.255', '192.88.99.1', '192.88.99.2', '192.168.1.1',
   '198.18.0.0', '198.18.0.1', '198.19.255.255', '198.51.100.1', '203.0.113.1', '224.0.0.1', '239.255.255.255', '240.0.0.1', '255.255.255.255',
-  '::', '::1', 'fe80::1', 'febf::1', 'fc00::1', 'fd00::1', 'ff02::1', '100::1',
+  '::', '::1', '2::1', '3::1', '20::1', '300::1', '1fff:ffff::1', '4000::1', 'fe80::1', 'febf::1', 'fc00::1', 'fd00::1', 'ff02::1', '100::1',
   '::ffff:192.168.1.1', '::ffff:c000:201', '::ffff:8.8.8.8', '::ffff:0808:0808',
   '2001:db8::1', '2001:0db8:ffff:ffff:ffff:ffff:ffff:ffff', '2001:2::1', '2001:2:0:ffff::1',
   '2001:10::1', '2001:1f:ffff::1', '2001:20::1', '2001:30::1', '2001:100::1', '2001:1ff:ffff::1',
@@ -623,4 +625,24 @@ test('release: module, script, README and technical documentation agree on 1.5.0
   assert.doesNotMatch(SOURCE, /countryVote|consensusGeo|function vote/);
   const intelligence = SOURCE.slice(SOURCE.indexOf('/* ---------- Same-IP'), SOURCE.indexOf('/* ---------- Website'));
   assert.deepEqual([...new Set([...intelligence.matchAll(/https:\/\/([^/"]+)/g)].map(m => m[1]))], ['ip.net.coffee']);
+});
+
+for (const [endpoint, argument] of [['/cdn-cgi/trace', ''], ['/api/geoip/', 'RISK=0']]) {
+  for (const status of [403, 429, 500]) test('Net.Coffee: ' + endpoint + ' HTTP ' + status + ' fails independently', async () => {
+    const store = new Map();
+    const rt = runtime({ store, argument, respond: q => q.url.includes(endpoint) ? reply('private failure body', status, { 'Retry-After': '120' }) : defaultReply(q) });
+    await rt.run('main()'); assert.equal(rt.done.length, 1); assert.match(rt.done[0].content, /IP 情报暂不可用/);
+    assert.equal(JSON.stringify([rt.done, rt.logs, rt.writes]).includes('private failure body'), false);
+    const next = runtime({ store, argument, clockStart: NOW + 1000 }); await next.run("getNetworkIntelligence('')");
+    assert.equal(next.calls.some(q => q.url.includes(endpoint)), status === 500);
+  });
+}
+
+test('cache: reading a risk hit does not extend its original expiry', async () => {
+  const store = new Map(); await runtime({ store }).run("getNetworkIntelligence('')");
+  const time = JSON.parse(store.get(INTEL)).entries.risk.time;
+  const warm = runtime({ store, clockStart: time + 3590000 }); await warm.run("getNetworkIntelligence('')");
+  assert.equal(warm.calls.length, 1); assert.equal(JSON.parse(store.get(INTEL)).entries.risk.time, time);
+  const stale = runtime({ store, clockStart: time + 3600000 }); await stale.run("getNetworkIntelligence('')");
+  assert.equal(stale.calls.length, 2);
 });

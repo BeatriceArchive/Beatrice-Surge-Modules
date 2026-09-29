@@ -316,7 +316,7 @@ async function querySource(name, url, policy, parse, textMode) {
     const retry = getHeader(response.headers, "retry-after");
     const seconds = /^\d+$/.test(retry) ? Number(retry) : (Date.parse(retry) - Date.now()) / 1000;
     // Endpoint cooldowns survive exit changes. Do not evade a quota by changing nodes.
-    const wait = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 24 * 60 * 60 * 1000;
+    const wait = Number.isFinite(seconds) ? Math.max(0, seconds) * 1000 : 24 * 60 * 60 * 1000;
     writeJSON(key, { until: Date.now() + Math.min(Math.max(wait, 60000), 7 * 86400000) });
     return unavailableSource(name, response.status === 429 ? "限流" : "访问受限");
   }
@@ -659,7 +659,7 @@ function downloadSpeedBlock(policy, blockBytes, budget) {
       url: "https://speed.cloudflare.com/__down?bytes=" + blockBytes + "&_=" + started + "-" + budget.requests,
       timeout: Math.min(SPEED_REQUEST_TIMEOUT, Math.max(0.1, remaining / 1000)),
       "binary-mode": true, "auto-cookie": false, "auto-redirect": false,
-      headers: { "User-Agent": "Surge-Betty-Panel/1.4", "Accept": "application/octet-stream", "Accept-Encoding": "identity", "Cache-Control": "no-store" }
+      headers: { "User-Agent": "Surge-Betty-Panel/1.5", "Accept": "application/octet-stream", "Accept-Encoding": "identity", "Cache-Control": "no-store" }
     };
     if (clean(policy)) request.policy = clean(policy);
     try {
@@ -1226,8 +1226,8 @@ function isPublicIP(value) {
       !(a === 203 && b === 0 && c === 113);
   }
   // Global unicast only; mapped IPv4 is not an IPv6 wire-source address.
-  if (!/^[23]/.test(ip)) return false;
   const words = ip.split(":").map(function (part) { return parseInt(part || "0", 16); });
+  if (words[0] < 0x2000 || words[0] > 0x3fff) return false;
   if (words[0] === 0x3fff && words[1] < 0x1000) return false; // RFC 9637 documentation /20
   if (words[0] !== 0x2001) return true;
   if (words[1] === 0xdb8) return false; // RFC 3849 documentation /32
