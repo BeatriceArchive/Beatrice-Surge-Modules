@@ -2,11 +2,12 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.11.1";
+const N="贝蒂的哔哩哔哩每日签到",V="1.11.2";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
 const SHARE_KEY="betty.bilibili.daily.share_attempt.";
+const SHARE_RETRY_MS=60000;
 const COIN_KEY="betty.bilibili.daily.coin_budget.";
 const MAX=5,TO=7,TTL=360000,RUN_MS=270000,COIN_MAX_WRITES=10,COIN_MAX_34004=3;
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
@@ -190,23 +191,48 @@ async function share(list,watched,uid,csrf,cookie){
    return op("分享",null,"尝试记录已修复；今日暂停分享写入，明日起恢复");
   }
  }
- if(attempt&&attempt.day===day)return attempt.confirmed===true?null:confirmShare(cookie,attempt,key);
+ let tries=1;
+ if(attempt&&attempt.day===day){
+  if(attempt.confirmed===true)return null;
+  const rejected=shareRejected(attempt),count=shareTries(attempt);
+  // Only an explicit API rejection may be retried, once, on a later button
+  // press. Cron, ambiguous responses and accepted requests never retry.
+  const manual=isPanel()&&typeof $trigger!=="undefined"&&$trigger==="button";
+  const cooled=!attempt.submittedAt||Date.now()-attempt.submittedAt>=SHARE_RETRY_MS;
+  if(!rejected||!manual||count>=2||!cooled)return attempt.code===-403||attempt.code===403?shareFailure(attempt,cookie,false):confirmShare(cookie,attempt,key);
+  tries=count+1;
+ }
  let v=watched;
  if(!v)for(let i=0;i<Math.min(list.length,4);i++){v=await shareVideo(list[i],cookie);if(v)break}
  if(!v)return op("分享",null,"没有可用视频");
  // Persist before sending: a timeout or killed script must not cause another write.
  if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
  checkRun(TO*1000);
- attempt={version:2,day,requestSucceeded:false,code:null,confirmed:false};
+ attempt={version:3,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:""};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
  // Fixed task-oriented request, aligned with current BLTH. No parameter retries.
  const target=v.aid?{aid:v.aid}:{bvid:v.bvid};
  const b=await postForm(A.share,form({...target,csrf,source:"pc_client_normal",eab_x:2,ramval:0,ga:1}),cookie,HOME+"video/"+v.bvid+"/"),e=classify(b,"分享");
  attempt.code=code(b);attempt.requestSucceeded=attempt.code===0||attempt.code===71000;
- $persistentStore.write(JSON.stringify(attempt),key);
- if(e&&e.fatal)return e;
- if(attempt.code===-403||attempt.code===403)return op("分享",attempt.code,"服务端拒绝分享；未确认完成，今日不再写入。Cookie 可验证不代表分享获准");
+ attempt.httpStatus=num(b&&b.__httpStatus);attempt.message=shareMessage(b&&(b.message||b.msg),cookie,csrf);
+ if(!$persistentStore.write(JSON.stringify(attempt),key))attempt.tries=2;
+ if(e&&e.fatal)return{...e,message:attempt.message||"B站拒绝了分享请求"};
+ if(attempt.code===-403||attempt.code===403)return shareFailure(attempt,cookie,true);
  return confirmShare(cookie,attempt,key);
+}
+function shareTries(a){return a.version===3?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
+function shareRejected(a){return a.code===-403&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&(a.version===3?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.version===2||a.version==null)}
+function shareMessage(value,cookie,csrf){
+ let s=String(value||"");const secrets=[csrf,...Object.values(parseCookie(cookie))].filter(v=>typeof v==="string"&&v.length>0).sort((a,b)=>b.length-a.length);
+ for(const v of secrets){const tokens=[v,encodeURIComponent(v)];try{tokens.push(decodeURIComponent(v))}catch(_){}for(const token of tokens)if(token)s=s.split(token).join("[已隐藏]");}
+ return txt(s.replace(/https?:\/\/[^\s]+/gi,"[链接已隐藏]").replace(/[A-Za-z0-9_%+\/=.-]{24,}/g,"[已隐藏]"),100);
+}
+function shareFailure(a,cookie,fresh){
+ const retry=shareRejected(a)&&shareTries(a)<2,remaining=a.submittedAt?Math.max(0,Math.ceil((a.submittedAt+SHARE_RETRY_MS-Date.now())/1000)):0;
+ const recovery=retry?(remaining?remaining+" 秒后可手动刷新重试一次":"可手动刷新重试一次"):"今日不再提交分享";
+ const when=Number.isFinite(a.submittedAt)&&a.submittedAt>0?new Date(a.submittedAt+8*3600000).toISOString().slice(11,19):"旧版未记录";
+ const message=shareMessage(a.message,cookie,parseCookie(cookie).bili_jct)||"旧版未保留或响应无 message";
+ return{...op("分享",a.code,"服务端拒绝分享；"+recovery),detail:(fresh?"本轮已提交":"历史失败，本轮未提交")+"｜请求时间 "+when+"（北京时间）｜HTTP "+(a.httpStatus==null?"未知":a.httpStatus)+"\n服务端信息："+message};
 }
 // Sharing needs an archive identifier, not the playback CID/duration. Prefer
 // identifiers already returned by the official feed; a view failure must not
@@ -229,7 +255,7 @@ async function confirmShare(cookie,attempt,key){
   if(b&&code(b)===0&&b.data&&b.data.share===true){attempt.confirmed=true;$persistentStore.write(JSON.stringify(attempt),key);return null}
  }
  const pending=attempt.requestSucceeded===true||attempt.code==null;
- return{...op("分享",attempt.code,pending?"分享请求已提交，经验待确认；再次刷新仅查询到账，不重复分享":"每日分享任务未确认；今日写入次数已用尽"),pending};
+ return{...op("分享",attempt.code,pending?"分享结果未确定，经验待确认；再次刷新仅查询到账，不重复分享":"分享未确认；本地重复提交保护生效，今日不再提交"),pending};
 }
 
 async function coins(list,goal,start,uid,csrf,cookie,balance=MAX){
@@ -295,7 +321,7 @@ function vipPanel(v){return v.done===null?"大会员经验➖":v.done?"大会员
 function vipNotice(v){if(v.done===null)return"大会员经验 ➖ 非大会员";if(v.done)return"大会员经验 ✅ "+v.label;const c=v.err&&v.err.code!=null?" code "+v.err.code:"";return"大会员经验 ❌ "+v.label+c}
 function currentLevelExp(u){return num(u&&u.level_info&&u.level_info.current_exp)}
 function taskExp(s,fx,fc){if(!s)return null;const count=fc==null?confirmedCoins(fx,s):fc;if(count===null)return null;return(s.login?5:0)+(s.watch?5:0)+(s.share?5:0)+count*10}
-function taskNotice(name,before,after,err){if(after)return name+" ✅ "+(before?"已完成":"本次完成");const c=err&&err.code!=null?" code "+err.code:"";return name+(err&&err.pending?" ⏳ 待确认":" ❌ 未完成")+c+(err&&err.message?"｜"+err.message:"")}
+function taskNotice(name,before,after,err){if(after)return name+" ✅ "+(before?"已完成":"本次完成");const c=err&&err.code!=null?" code "+err.code:"";return name+(err&&err.pending?" ⏳ 待确认":" ❌ 未完成")+c+(err&&err.message?"｜"+err.message:"")+(err&&err.detail?"\n"+err.detail:"")}
 function coinNotice(before,after,limited,err,meta,spent=0){let s="投币 "+(after==null?"未知/5":after+"/5")+"（官方经验）｜本次明确成功 "+spent+" 枚";if(meta)s+="｜写入 "+meta.writes+" 次"+(meta.hit34004?"｜34004×"+meta.hit34004:"");if(limited)s+="｜余额不足";if(err)s+="｜"+err.message;if(spent&&before!==null&&after!==null&&after-before<spent)s+="｜经验待同步";return s}
 function levelExpNotice(a,b){if(a===null||b===null)return"账号等级经验 未能读取前后值";const d=b-a;return"账号等级经验 "+a+" → "+b+"（"+(d>=0?"+":"")+d+"）"}
 function dailyExpNotice(a,b){if(a===null||b===null)return"每日普通任务经验 未能读取前后值";const d=b-a;return"每日普通任务经验 "+a+"/65 → "+b+"/65（"+(d>=0?"+":"")+d+"）"}
