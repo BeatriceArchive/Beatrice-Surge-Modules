@@ -307,7 +307,7 @@ test('cookie: explicit reset destroys both committed and legacy sessions without
 const SH = 'betty.bilibili.daily.share_attempt.42';
 const sept11 = Date.parse('2026-09-11T04:00:00Z');
 
-test('share: real -403 response is rejected, does not invalidate Cookie, and is never retried today', async () => {
+test('share: real -403 response is rejected, does not invalidate Cookie, and cannot immediately retry', async () => {
   const store = priorSession();
   const rt = runtime('Betty-Bilibili-Daily', { store, respond: (_, method) => method === 'post' ? { code: -403, message: '账号异常，操作失败' } : state(false) });
   const result = await shareRun(rt);
@@ -320,10 +320,11 @@ test('share: real -403 response is rejected, does not invalidate Cookie, and is 
   assert.equal(store.get(CK + '.invalid_notice'), undefined);
 });
 
-test('share: legacy same-day attempt remains consumed after request format upgrade; next Beijing day permits one write', async () => {
+test('share: cron preserves legacy same-day rejection; next Beijing day permits one write', async () => {
   let clock = sept11;
   const store = new Map([[SH, JSON.stringify({ day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false })]]);
-  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => clock, respond: (_, method) => method === 'post' ? { code: 0 } : state(false) });
+  const rt = runtime('Betty-Bilibili-Daily', { store, trigger: undefined, now: () => clock, respond: (_, method) => method === 'post' ? { code: 0 } : state(false) });
+  rt.run('delete globalThis.$input; delete globalThis.$trigger');
   await shareRun(rt);
   assert.equal(rt.calls.filter(x => x.method === 'post').length, 0);
   clock = Date.parse('2026-09-11T16:00:01Z');
@@ -854,4 +855,89 @@ test('share: pending delivery is visible and later refresh only confirms the exi
   assert.match(rt.notices.at(-1)[2], /分享 ⏳ 待确认/);
   const again = runtime('Betty-Bilibili-Daily', { store: rt.store, respond: () => state(true) });
   assert.equal(await shareRun(again), null);assert.equal(again.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share recovery: screenshot-era explicit rejection permits one manual retry and confirms real state', async () => {
+  const store = new Map([[SH, JSON.stringify({ version: 2, day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false })]]);
+  let shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (_, method) => {
+    if (method === 'post') { assert.equal(JSON.parse(store.get(SH)).tries, 2);shared = true;return { code: 0 }; }
+    return state(shared);
+  } });
+  assert.equal(await shareRun(rt), null);
+  await shareRun(rt);
+  assert.equal(rt.calls.filter(x => x.method === 'post').length, 1);
+  assert.equal(JSON.parse(store.get(SH)).confirmed, true);
+});
+
+test('share recovery: one minute cooldown and durable two-request limit survive restarts', async () => {
+  let clock = sept11;
+  const store = new Map();
+  const options = { store, now: () => clock, respond: (_, method) => method === 'post' ? { code: -403, message: '账号异常,操作失败' } : state(false) };
+  const first = runtime('Betty-Bilibili-Daily', options);
+  assert.match((await shareRun(first)).detail, /本轮已提交.*HTTP 200/);
+  const early = runtime('Betty-Bilibili-Daily', options);
+  assert.match((await shareRun(early)).detail, /历史失败，本轮未提交/);
+  assert.equal(early.calls.filter(x => x.method === 'post').length, 0);
+  clock += 60001;
+  const retry = runtime('Betty-Bilibili-Daily', options);
+  assert.match((await shareRun(retry)).message, /今日不再提交/);
+  assert.equal(retry.calls.filter(x => x.method === 'post').length, 1);
+  clock += 60001;
+  const exhausted = runtime('Betty-Bilibili-Daily', options);
+  const result = await shareRun(exhausted);
+  assert.match(result.detail, /历史失败，本轮未提交.*12:01:00.*HTTP 200/);
+  assert.match(result.detail, /账号异常,操作失败/);
+  assert.equal(exhausted.calls.filter(x => x.method === 'post').length, 0);
+  assert.equal(JSON.parse(store.get(SH)).tries, 2);
+});
+
+for (const reply of [null, { code: 0 }, { code: 71000 }, http(403, { code: -403 }), http(500, { code: -403 }), { code: -412 }]) {
+  test(`share recovery: no manual retry for uncertain, accepted, HTTP or risk response ${JSON.stringify(reply)}`, async () => {
+    let clock = sept11;
+    const first = runtime('Betty-Bilibili-Daily', { now: () => clock, respond: (_, method) => method === 'post' ? reply : state(false) });
+    await shareRun(first);clock += 60001;
+    const later = runtime('Betty-Bilibili-Daily', { store: first.store, now: () => clock, respond: () => state(false) });
+    await shareRun(later);
+    assert.equal(later.calls.filter(x => x.method === 'post').length, 0);
+  });
+}
+
+test('share recovery: response persistence failure leaves an uncertain reservation, never a retryable rejection', async () => {
+  let records = 0, clock = sept11;
+  const first = runtime('Betty-Bilibili-Daily', { now: () => clock, failStore: key => key === SH && ++records === 2, respond: (_, m) => m === 'post' ? { code: -403 } : state(false) });
+  await shareRun(first);clock += 60001;
+  const next = runtime('Betty-Bilibili-Daily', { store: first.store, now: () => clock, respond: () => state(false) });
+  await shareRun(next);assert.equal(next.calls.filter(x => x.method === 'post').length, 0);
+});
+
+test('share recovery: manual retry reservation failure never sends a second request', async () => {
+  const store = new Map([[SH, JSON.stringify({ version: 2, day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false })]]);
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, failStore: true, respond: () => state(false) });
+  assert.match((await shareRun(rt)).message, /无法保存/);
+  assert.equal(rt.calls.filter(x => x.method === 'post').length, 0);
+});
+
+test('share recovery: diagnostic message hides credentials before persistence and notification', async () => {
+  const cookie = 'SESSDATA=private-session-value; bili_jct=private-csrf-value; DedeUserID=42; buvid3=private-device-value';
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => sept11, respond: (_, m) => m === 'post' ? { code: -403, message: `拒绝 ${cookie} https://example.com/?key=hidden` } : state(false) });
+  rt.context.fixtureVideo = video;rt.context.fixtureCookie = cookie;
+  const result = await rt.run("share([],fixtureVideo,'42','private-csrf-value',fixtureCookie)");
+  const serialized = JSON.stringify(result) + rt.store.get(SH);
+  for (const secret of ['private-session-value', 'private-csrf-value', 'private-device-value', 'example.com']) assert.ok(!serialized.includes(secret));
+  assert.match(result.detail, /HTTP 200/);
+  assert.match(result.detail, /已隐藏/);
+});
+
+test('share recovery: normal entry migrates saved -403 and surfaces a new rejection instead of the old count message', async () => {
+  const store = priorSession(true);
+  store.set(SH, JSON.stringify({ version: 2, day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false }));
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, m) => dailyResponse(q, m, { exp: 10, money: 0, share: false, post: { code: -403, message: '访问权限不足' } }) });
+  await rt.start();
+  assert.equal(rt.calls.filter(x => x.method === 'post').length, 1);
+  assert.equal(coinPosts(rt).length, 0);
+  assert.match(rt.notices[0][2], /本轮已提交.*HTTP 200/);
+  assert.match(rt.notices[0][2], /服务端信息：访问权限不足/);
+  assert.ok(!rt.notices[0][2].includes('写入次数已用尽'));
+  assert.equal(store.get(CK), oldCookie);
 });
