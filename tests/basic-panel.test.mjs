@@ -744,9 +744,11 @@ test('speed cache: equivalent IPv6 remains matched and old quick samples become 
 });
 
 test('compact panel: 500 is abnormal, successful GET is quiet, Taiwan uses text, traffic means remaining', async () => {
+  // The UI formats expiry in the device's timezone; keep this calendar fixture local.
+  const expiry = Math.floor(new Date(2026, 11, 29, 12).getTime() / 1000);
   const rt = runtime({ network: { wifi: { ssid: '6-1904' }, v4: { primaryAddress: '192.168.1.8' }, v6: { primaryAddress: 'fe80::1' }, dns: ['192.168.1.1'] },
     apiReply: path => path.includes('dns_delay') ? { delay: 0.024 } :
-      { profile: '# subscription-userinfo: upload=0; download=1535450808; total=322122547200; expire=1798502400' },
+      { profile: '# subscription-userinfo: upload=0; download=1535450808; total=322122547200; expire=' + expiry },
     respond: q => q.url.includes('/api/ip/lookup/') ? reply(lookup(IP, { countryCode: 'TW', region: 'New Taipei City', city: 'New Taipei City', company_type: 'business' })) :
       q.url.includes('netflix.com') ? reply('<title>Netflix</title>/title/81280792 {"countryCode":"TW"}') :
       q.url.includes('grok.com') ? reply('', 500) :
