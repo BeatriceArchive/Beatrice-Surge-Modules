@@ -1,0 +1,45 @@
+#!name=Beatrice ENET Patch
+#!desc=ENET 托管配置 DNS 接管、哔哩哔哩直连与媒体 TCP 兼容补丁；配合 Beatrice Surge System 使用
+#!system=ios
+# Copyright (c) 2026 BeatriceArchive
+# Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
+# License: https://github.com/BeatriceArchive/Beatrice-Surge-Modules/blob/main/LICENSE
+
+[General]
+# 保留机场 DNS 上游；接管进入 VIF 的硬编码 UDP DNS 查询。
+hijack-dns = *:53
+# 只跳过视频 HTTPS TCP 的协议嗅探；保留原有条目，不影响 UDP/QUIC。
+always-raw-tcp-hosts = %APPEND% *.bilivideo.com:443, *.mcdn.bilivideo.cn:443, upos-hz-mirrorakam.akamaized.net:443, upos-bstar-mirrorakam.akamaized.net:443, upos-bstar1-mirrorakam.akamaized.net:443
+
+[Rule]
+# 模块规则前置；extended-matching 补充可见的 TLS SNI / HTTP Host。
+DOMAIN-SUFFIX,acg.tv,DIRECT,extended-matching
+DOMAIN-SUFFIX,acgvideo.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,b23.tv,DIRECT,extended-matching
+DOMAIN-SUFFIX,bili2233.cn,DIRECT,extended-matching
+DOMAIN-SUFFIX,biliapi.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,biliapi.net,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibili.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibili.cn,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibili.net,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibili.tv,DIRECT,extended-matching
+DOMAIN-SUFFIX,biliimg.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,biliintl.co,DIRECT,extended-matching
+DOMAIN-SUFFIX,biliintl.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilivideo.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilivideo.cn,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilivideo.net,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilicdn1.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilicdn2.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilicdn3.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilicdn4.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilicdn5.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,hdslb.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,hdslb.net,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibilipay.com,DIRECT,extended-matching
+DOMAIN-SUFFIX,bilibilipay.cn,DIRECT,extended-matching
+DOMAIN,p.bstarstatic.com,DIRECT,extended-matching
+DOMAIN,p-bstarstatic.akamaized.net,DIRECT,extended-matching
+DOMAIN,upos-hz-mirrorakam.akamaized.net,DIRECT,extended-matching
+DOMAIN,upos-bstar-mirrorakam.akamaized.net,DIRECT,extended-matching
+DOMAIN,upos-bstar1-mirrorakam.akamaized.net,DIRECT,extended-matching

@@ -11,6 +11,7 @@
 | 模块 | 当前用途 | 版本 / 状态 |
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
+| `Beatrice-ENET-Patch.sgmodule` | ENET DNS 接管 / Bilibili DIRECT / 媒体 TCP 兼容 | 配合 System |
 | `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.3 |
 | `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.10.0 |
 | `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.0 |
@@ -18,6 +19,7 @@
 ### 安装地址
 
 - [贝蒂的 Surge 托管设置](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Beatrice-Surge-System.sgmodule)
+- [Beatrice ENET Patch](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Beatrice-ENET-Patch.sgmodule)
 - [贝蒂的基础面板](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Basic-Panel.sgmodule)
 - [贝蒂的哔哩哔哩每日签到](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Daily.sgmodule)
 - [贝蒂的哔哩哔哩 Cookie 获取](https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Modules/Betty-Bilibili-Cookie.sgmodule)
@@ -48,6 +50,25 @@
 它不添加 MITM、Rewrite、Script、Panel 或策略组，也不覆盖托管配置的 DNS / DoH、`skip-proxy` 或 `tun-excluded-routes`。
 
 严格源公网 IP 白名单环境下，关闭全局 Wi-Fi Assist / Hybrid 可减少主动蜂窝分流，IPv6 基线减少地址族漂移，但不能固定公网源 IP：物理网络切换、节点显式 IPv6 地址、节点 `hybrid=on` 或 SSID 级蜂窝回退仍需按托管配置与实机行为确认。System 不修改机场节点、策略组或规则。
+
+### Beatrice-ENET-Patch.sgmodule
+
+**Beatrice ENET Patch**
+
+在 ENET 原生托管配置上同时启用 **System + ENET Patch**，继续使用机场原订阅。System 保持不变，负责 VIF、IPv6、UDP 回退、ICMP 与代理共享；Patch 只添加 `hijack-dns`、媒体 `always-raw-tcp-hosts` 和 Bilibili DIRECT 规则。两个模块没有重叠 General 键，System 不含 Rule，二者先后顺序不影响结果。若另外启用会覆盖这些键或拦截 Bilibili 的模块，仍需检查 Surge 的“生效顺序”。
+
+- `hijack-dns = *:53` 接管进入 VIF 的硬编码 UDP DNS 查询，恢复 Fake IP 与域名分流；保留 ENET 的 DNS 上游、局域网及系统服务排除。它不解密应用自带 DoH/DoT，也不承诺拦截 TCP DNS。
+- ENET 当前 `doh-server` 是有效的旧别名，对应现代 `encrypted-dns-server`。普通实际解析继续走腾讯 DoH、默认 DIRECT；传统 DNS 仍用于 DoH 主机名引导与连通性检测，不能宣称“零明文 DNS”。代理域名通常交给远端解析，但 ENET 中需要解析的 IP/GEOIP 规则仍可能先触发本地 DoH。
+- 在 **Rule-Based** 模式下，主站、API、图片、视频、mcdn、UPOS、相关支付及国际版域名前置 DIRECT；共享 Akamai 只列精确 Bilibili 主机，不直连整个共享 CDN。`extended-matching` 仅补充可见的 SNI/HTTP Host，不能识别所有无域名的 IP/P2P 流量。
+- raw TCP 仅追加 `*.bilivideo.com:443`、`*.mcdn.bilivideo.cn:443` 与三个精确 Akamai UPOS 主机，跳过协议嗅探，不改 TLS/HTTP2 协商、不阻断 DIRECT QUIC。DNS 已保留域名的媒体连接不依赖 SNI；无域名连接若无法嗅探，不能保证匹配。
+- 不添加 STUN REJECT、全局 QUIC 封锁、MITM、Rewrite、Script、Panel、Proxy 或 Proxy Group。保留 captive portal 与网络切换的原有兼容路径；校园网、酒店认证及局域网私有域名仍需真机验证，遇到认证问题先关闭 Surge 完成认证。
+- **Not implemented: Module limitation** — 不改机场节点/策略组、不改 Snell 服务端、不强制 DoH 走未知代理组；不使用未经官方确认的空值关闭 controller，也不把 `proxy-restricted-to-lan` 当作 controller 的保护开关。ENET 的 controller 原值保留；Mac-only listener 与陈旧引擎参数不在此 iOS 补丁中处理。
+
+核验日期：2026-10-05。依据：[官方 Module](https://manual.nssurge.com/profile/module.html)、[General](https://manual.nssurge.com/profile/general.html)、[DNS](https://manual.nssurge.com/dns/advanced.html)、[Encrypted DNS](https://manual.nssurge.com/dns/encrypted-dns.html)、[Domain Rules](https://manual.nssurge.com/rules/domain.html) 与 [HTTP Processing](https://manual.nssurge.com/http/overview.html)。交叉参考 [SukkaW/Surge](https://github.com/SukkaW/Surge)、[blackmatrix7](https://github.com/blackmatrix7/ios_rule_script)、[Rabbit-Spec](https://github.com/Rabbit-Spec/Surge)、[dler-io/Rules](https://github.com/dler-io/Rules) 和 [Hackl0us](https://github.com/Hackl0us/SS-Rule-Snippet) 的当时最新 HEAD；旧配置仅用于结构/域名比较，不继承旧默认值。DivineEngine 原地址不可用，以 dler-io 的现有规则交叉参考。
+
+已核对模块静态语法、两个加载顺序的合并逻辑、域名命中范围与秘密检查。Bilibili 公共播放接口仍返回 `bilivideo.com` 和精确 Akamai UPOS；`io.hdslb.com` 在双源 DNS 查询中均为 NXDOMAIN，未照搬。未纳入缺少当前业务证据的 `bilicomics`、泛 CDN 根域及动态 P2P IP。未执行 iPhone/Surge 泄漏或播放测试；raw TCP 是否改善卡顿须真机 A/B。
+
+远程模块持续跟随上方稳定 `main` Raw 地址更新；机场托管配置更新与模块更新独立。禁用 Patch 即撤回其额外 DNS/规则/TCP 设置，禁用 System 可撤回通用基线。
 
 ### Betty-Basic-Panel.sgmodule
 
