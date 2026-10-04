@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
-function runtime(name, { store = new Map(), respond = () => ({ code: 0 }), trigger = 'button', failStore = false, now = () => Date.now(), onWrite = () => {} } = {}) {
+function runtime(name, { store = new Map(), respond = () => ({ code: 0 }), trigger = 'button', failStore = false, now = () => Date.now(), onWrite = () => {}, onSleep = () => {} } = {}) {
   const calls = [], notices = [], writes = [], completions = [];
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now()])); } static now() { return now(); } }
   const context = vm.createContext({
     console: { log() {} }, Date: Clock, Math, Uint8Array, ArrayBuffer,
-    setTimeout: fn => { queueMicrotask(fn); return 1; }, clearTimeout() {},
+    setTimeout: (fn, ms) => { queueMicrotask(() => { onSleep(ms); fn(); }); return 1; }, clearTimeout() {},
     $input: { purpose: 'panel' }, $trigger: trigger, $argument: '',
     $persistentStore: { read: k => store.get(k) || '', write: (v, k) => {
       if (typeof failStore === 'function' ? failStore(k, v) : failStore) return false;
@@ -460,4 +460,304 @@ test('daily: verified session sends the device-confirmed PC-client form and comp
   assert.equal(store.get(SESSION), previousSession);
   assert.equal(JSON.parse(store.get(SH)).confirmed, true);
   assert.match(rt.completions[0].content, /今日任务已完成/);
+});
+
+// Audit regressions: exercise real entry/HTTP/persistence paths, never real accounts.
+const COIN = 'betty.bilibili.daily.coin_budget.42';
+const DAILY_STATE = 'betty.bilibili.daily.panel_state';
+const DAILY_LOCK = 'betty.bilibili.daily.run_lock';
+const navOK = (money = 10, vipStatus = 0) => ({ code: 0, data: { isLogin: true, mid: 42, money, vipStatus, level_info: { current_exp: 100 } } });
+function dailyResponse(q, method, { exp = 0, money = 10, vip = 0, post = { code: 0 }, watch = true, share = true } = {}) {
+  if (method === 'post') return post;
+  if (q.url.endsWith('/nav')) return navOK(money, vip);
+  if (q.url.endsWith('/exp/reward')) return { code: 0, data: { login: true, watch, share, coins: exp } };
+  if (q.url.endsWith('/coin/today/exp')) return { code: 0, data: exp };
+  if (q.url.includes('/archive/coins')) return { code: 0, data: { multiply: 0 } };
+  if (q.url.includes('/view?')) return { code: 0, data: { ...video, owner: { mid: 99 }, copyright: 1 } };
+  return { code: 0, data: { items: [], list: Array.from({ length: 8 }, (_, i) => ({ bvid: 'BV123456789' + i })) } };
+}
+const coinPosts = rt => rt.calls.filter(q => q.method === 'post' && q.url.endsWith('/coin/add'));
+const coinRun = rt => rt.run("coins(['BV1234567890','BV1234567891','BV1234567892','BV1234567893','BV1234567894','BV1234567895'],5,0,'42','csrf-fixture','cookie-fixture')");
+
+for (const response of [null, http(503, { code: 0 }), http(403, ''), { code: -403 }, { code: 0, data: {} }, { code: false, data: { isLogin: true } }]) {
+  test(`daily: transient/malformed nav ${JSON.stringify(response)} does not invalidate session`, async () => {
+    const store = priorSession(true), before = store.get(SESSION);
+    const rt = runtime('Betty-Bilibili-Daily', { store, respond: () => response });
+    await rt.start();
+    assert.match(rt.completions[0].content, /登录状态查询失败/);
+    assert.equal(store.get(CK + '.invalid_notice'), undefined);
+    assert.equal(store.get(SESSION), before);
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.equal(rt.completions.length, 1);
+    assert.equal(store.get(DAILY_LOCK), '');
+  });
+}
+
+for (const response of [{ code: -101 }, { code: -111 }, { code: 0, data: { isLogin: false } }]) {
+  test(`daily: explicit auth failure ${JSON.stringify(response)} marks session without deleting it`, async () => {
+    const store = priorSession(true), before = store.get(SESSION);
+    const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => response });
+    await rt.start();
+    assert.match(rt.completions[0].content, /Cookie 已失效/);
+    assert.equal(store.get(CK + '.invalid_notice'), '2026-09-11');
+    assert.equal(store.get(SESSION), before);
+  });
+}
+
+test('daily: successful validation clears a stale invalid marker', async () => {
+  const store = priorSession(true);store.set(CK + '.invalid_notice', '2026-09-10');
+  const rt = runtime('Betty-Bilibili-Daily', { store, respond: (q, m) => dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();
+  assert.equal(store.get(CK + '.invalid_notice'), '');
+});
+
+test('daily: verifies cookie UID, metadata UID and live UID before writes', async () => {
+  for (const mismatch of ['cookie', 'meta', 'live', 'header']) {
+    const store = priorSession(true), s = JSON.parse(store.get(SESSION));
+    if (mismatch === 'cookie') s.cookie = s.cookie.replace('DedeUserID=42', 'DedeUserID=99');
+    if (mismatch === 'meta') delete s.meta.uid;
+    if (mismatch === 'header') s.cookie += '\r\nInjected: value';
+    store.set(SESSION, JSON.stringify(s));
+    const rt = runtime('Betty-Bilibili-Daily', { store, respond: () => ({ code: 0, data: { ...navOK().data, mid: 99 } }) });
+    await rt.start();
+    assert.match(rt.completions[0].content, /Cookie 已失效/);
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    if (mismatch !== 'live') assert.equal(rt.calls.length, 0);
+  }
+});
+
+for (const [path, code] of [['/exp/reward', -101], ['/coin/today/exp', -111], ['/feed/all', -412], ['/view?', -102], ['/exp/reward', -352], ['/coin/today/exp', 429]]) {
+  test(`daily: fatal read ${path} code ${code} stops before task writes`, async () => {
+    const store = priorSession(true);
+    const rt = runtime('Betty-Bilibili-Daily', { store, respond: (q, m) => q.url.includes(path) ? { code } : dailyResponse(q, m, { watch: false }) });
+    await rt.start();
+    assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+    assert.equal(rt.completions.length, 1);
+    assert.match(rt.completions[0].content, /失效|被拒绝/);
+    if (![-101, -111].includes(code)) assert.notEqual(store.get(CK + '.invalid_notice'), '2026-09-11');
+  });
+}
+
+test('daily: GET retries a 503 once, POST never retries', async () => {
+  let calls = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { respond: () => ++calls === 1 ? http(503, { code: 0 }) : navOK() });
+  assert.equal((await rt.run("get(A.nav,'cookie',HOME,1)")).code, 0);
+  assert.equal(rt.calls.length, 2);
+  const post = runtime('Betty-Bilibili-Daily', { respond: () => http(503, { code: 0 }) });
+  assert.equal((await post.run("postForm(A.coinAdd,'body','cookie',HOME)")).__httpStatus, 503);
+  assert.equal(post.calls.length, 1);
+});
+
+for (const reply of [null, http(500, { code: 0 }), http(302, { code: 0 }), { code: -500 }, { code: 99999 }]) {
+  test(`coins: ambiguous ${JSON.stringify(reply)} blocks every same-day reentry`, async () => {
+    const rt = runtime('Betty-Bilibili-Daily', { now: () => sept11, respond: (q, m) => dailyResponse(q, m, { post: reply }) });
+    assert.ok((await coinRun(rt)).err);
+    assert.equal(coinPosts(rt).length, 1);
+    assert.equal(JSON.parse(rt.store.get(COIN)).pending, true);
+    const again = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => sept11, respond: dailyResponse });
+    assert.match((await coinRun(again)).err.message, /今日暂停/);
+    assert.equal(coinPosts(again).length, 0);
+    const tomorrow = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => sept11 + 86400000, respond: dailyResponse });
+    assert.equal((await coinRun(tomorrow)).spent, 5);
+    assert.equal(coinPosts(tomorrow).length, 5);
+  });
+}
+
+test('coins: delayed EXP cannot cause more than five accepted coins across runs', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => sept11, respond: dailyResponse });
+  assert.equal((await coinRun(rt)).spent, 5);
+  const again = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => sept11, respond: dailyResponse });
+  assert.equal((await coinRun(again)).spent, 0);
+  assert.equal(coinPosts(again).length, 0);
+  assert.equal(JSON.parse(rt.store.get(COIN)).count, 5);
+});
+
+test('coins: failed reservation never spends; failed commit retains the reservation', async () => {
+  for (const failAt of [1, 2]) {
+    let coinWrites = 0;
+    const rt = runtime('Betty-Bilibili-Daily', { now: () => sept11, respond: dailyResponse, failStore: key => key === COIN && ++coinWrites === failAt });
+    assert.ok((await coinRun(rt)).err);
+    assert.equal(coinPosts(rt).length, failAt - 1);
+    if (failAt === 2) {
+      assert.equal(JSON.parse(rt.store.get(COIN)).pending, true);
+      const again = runtime('Betty-Bilibili-Daily', { store: rt.store, now: () => sept11, respond: dailyResponse });
+      await coinRun(again);assert.equal(coinPosts(again).length, 0);
+    }
+  }
+});
+
+test('coins: malformed/future records quarantine today then recover tomorrow', async () => {
+  for (const value of ['{', 'null', '{"version":1,"day":"2999-01-01","count":0,"pending":false}', '{"version":1,"day":"2026-09-11","count":-1,"pending":false}']) {
+    const store = new Map([[COIN, value]]);
+    const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: dailyResponse });
+    assert.ok((await coinRun(rt)).err);assert.equal(coinPosts(rt).length, 0);
+    const next = runtime('Betty-Bilibili-Daily', { store, now: () => sept11 + 86400000, respond: dailyResponse });
+    assert.equal((await coinRun(next)).spent, 5);
+  }
+});
+
+test('coins: reservations are per UID and stop on missing live EXP', async () => {
+  const store = new Map([[COIN, JSON.stringify({ version: 1, day: '2026-09-11', count: 5, pending: true })]]);
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: dailyResponse });
+  const other = await rt.run("coins(['BV1234567890'],1,0,'84','csrf','cookie')");
+  assert.equal(other.spent, 1);
+  const unknown = runtime('Betty-Bilibili-Daily', { respond: (q, m) => q.url.includes('/coin/today/exp') ? null : dailyResponse(q, m) });
+  assert.ok((await coinRun(unknown)).err);assert.equal(coinPosts(unknown).length, 0);
+});
+
+test('coins: balance and already-donated video limits remain enforced', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { respond: dailyResponse });
+  const result = await rt.run("coins(['BV1234567890','BV1234567891','BV1234567892'],5,0,'42','csrf','cookie',2)");
+  assert.equal(result.spent, 2);assert.equal(result.err.code, -104);
+  for (const data of [{ multiply: 2 }, { multiply: null }, { multiply: false }]) {
+    const capped = runtime('Betty-Bilibili-Daily', { respond: (q, m) => q.url.includes('/archive/coins') ? { code: 0, data } : dailyResponse(q, m) });
+    await coinRun(capped);assert.equal(coinPosts(capped).length, 0);
+  }
+});
+
+test('coins: known 34004 failures remain bounded and do not consume a successful slot', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => dailyResponse(q, m, { post: { code: 34004 } }) });
+  const result = await coinRun(rt);
+  assert.equal(coinPosts(rt).length, 3);assert.equal(result.spent, 0);
+  assert.equal(JSON.parse(rt.store.get(COIN)).count, 0);
+  assert.equal(JSON.parse(rt.store.get(COIN)).pending, false);
+});
+
+test('daily: accepted coin writes with delayed EXP never claim task completion', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: dailyResponse });
+  await rt.start();
+  assert.equal(coinPosts(rt).length, 5);
+  assert.match(rt.completions[0].content, /投币 0\/5/);
+  assert.doesNotMatch(rt.completions[0].content, /今日任务已完成/);
+  assert.match(rt.notices.at(-1)[2], /明确成功 5 枚.*经验待同步/);
+  assert.match(rt.notices.at(-1)[2], /15\/65 → 15\/65/);
+});
+
+test('daily: zero balance is partial, and failed final nav never reuses the old balance', async () => {
+  const empty = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => dailyResponse(q, m, { money: 0 }) });
+  await empty.start();assert.match(empty.completions[0].content, /部分完成.*余额不足/);
+  assert.equal(coinPosts(empty).length, 0);
+  let navReads = 0;
+  const final = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => q.url.endsWith('/nav') && ++navReads > 1 ? null : dailyResponse(q, m) });
+  await final.start();assert.match(final.notices.at(-1)[2], /硬币余额 未知/);
+});
+
+test('daily: final daily-state failure cannot claim completion from an old snapshot', async () => {
+  let reads = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => q.url.endsWith('/exp/reward') && ++reads > 2 ? null : dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();assert.match(rt.completions[0].content, /最终状态未确认/);
+  assert.match(rt.notices.at(-1)[2], /不代表最终确认/);
+});
+
+test('daily: two official EXP sources use the higher confirmed count, not the stale lower one', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => q.url.includes('/coin/today/exp') ? { code: 0, data: 0 } : dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();assert.equal(coinPosts(rt).length, 0);
+  assert.match(rt.completions[0].content, /投币 5\/5/);
+  assert.match(rt.notices.at(-1)[2], /65\/65 → 65\/65/);
+});
+
+test('daily: VIP form carries the current device cookie; non-VIP avoids extra nav calls', async () => {
+  for (const vip of [0, 1]) {
+    const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => dailyResponse(q, m, { exp: 50, vip }) });
+    await rt.start();
+    const posts = rt.calls.filter(q => q.method === 'post');
+    assert.equal(posts.length, vip);
+    if (vip) assert.equal(new URLSearchParams(posts[0].body).get('buvid'), 'old-device');
+    else assert.equal(rt.calls.filter(q => q.url.endsWith('/nav')).length, 2);
+  }
+});
+
+for (const event of ['day', 'timeout', 'session', 'lock']) {
+  test(`daily: ${event} change during requests stops subsequent writes and completes once`, async () => {
+    let clock = sept11;
+    const store = priorSession(true);
+    const rt = runtime('Betty-Bilibili-Daily', { store, now: () => clock, respond: (q, m) => {
+      if (q.url.includes('/view?')) {
+        if (event === 'day') clock += 86400000;
+        if (event === 'timeout') clock += 269000;
+        if (event === 'session') store.set(SESSION, JSON.stringify({ version: 1, cookie: 'changed', meta: oldMeta }));
+        if (event === 'lock') store.set(DAILY_LOCK, JSON.stringify({ owner: 'new-owner', expiresAt: clock + 60000 }));
+      }
+      return dailyResponse(q, m);
+    } });
+    await rt.start();assert.equal(coinPosts(rt).length, 0);
+    assert.equal(rt.completions.length, 1);assert.match(rt.completions[0].content, /本轮已停止/);
+    if (event === 'lock') { assert.equal(JSON.parse(store.get(DAILY_LOCK)).owner, 'new-owner');assert.equal(store.get(DAILY_STATE), undefined); }
+    else assert.equal(store.get(DAILY_LOCK), '');
+  });
+}
+
+test('daily: actual cron entry works without panel or trigger globals', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => dailyResponse(q, m, { exp: 50 }) });
+  delete rt.context.$input;delete rt.context.$trigger;
+  await rt.start();assert.equal(rt.completions.length, 1);assert.equal(rt.completions[0], undefined);
+  assert.match(rt.store.get(DAILY_STATE), /今日任务已完成/);
+});
+
+test('daily: unknown panel trigger is local and a duplicate click cannot overwrite the saved result', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();const saved = rt.store.get(DAILY_STATE);
+  rt.store.set(DAILY_LOCK, JSON.stringify({ owner: 'other', expiresAt: Date.now() + 60000 }));
+  const busy = runtime('Betty-Bilibili-Daily', { store: rt.store });await busy.start();
+  assert.equal(rt.store.get(DAILY_STATE), saved);assert.equal(busy.calls.length, 0);
+  const automatic = runtime('Betty-Bilibili-Daily', { store: rt.store });delete automatic.context.$trigger;
+  await automatic.start();assert.equal(automatic.calls.length, 0);assert.equal(rt.store.get(DAILY_STATE), saved);
+});
+
+test('daily: yesterday cache expires at Beijing midnight with no automatic network traffic', async () => {
+  const store = priorSession(true);
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, m) => dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();assert.match(store.get(DAILY_STATE), /今日任务已完成/);
+  const next = runtime('Betty-Bilibili-Daily', { store, now: () => sept11 + 86400000, trigger: 'auto-interval' });
+  await next.start();assert.equal(next.calls.length, 0);
+  assert.doesNotMatch(next.completions[0].content, /今日任务已完成/);
+  assert.match(next.completions[0].content, /2026-09-12/);
+});
+
+test('daily: malformed numeric API values cannot masquerade as valid zero', () => {
+  const rt = runtime('Betty-Bilibili-Daily');
+  for (const value of ['false', 'true', '[]', '{}', '" "', 'null']) assert.equal(rt.run(`num(${value})`), null);
+  assert.equal(rt.run('coinCount(5)'), null);
+});
+
+test('daily: full watch/VIP/share/coin run completes only after official accounting', async () => {
+  let heartbeats = 0, watched = false, shared = false, vipClaimed = false, exp = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), now: () => sept11, respond: (q, m) => {
+    if (m === 'post') {
+      if (q.url.includes('/heartbeat')) watched = ++heartbeats >= 2;
+      else if (q.url.endsWith('/experience/add')) { assert.ok(watched);vipClaimed = true; }
+      else if (q.url.endsWith('/share/add')) shared = true;
+      else if (q.url.endsWith('/coin/add')) { assert.equal(JSON.parse(rt.store.get(COIN)).pending, true);exp += 10; }
+      else assert.fail('Unexpected task write');
+      return { code: 0 };
+    }
+    if (q.url.endsWith('/nav')) return { code: 0, data: { ...navOK(10 - exp / 10, 1).data, level_info: { current_exp: 100 + exp + (watched ? 5 : 0) + (shared ? 5 : 0) + (vipClaimed ? 10 : 0) } } };
+    return dailyResponse(q, m, { exp, watch: watched, share: shared });
+  } });
+  await rt.start();
+  assert.equal(coinPosts(rt).length, 5);assert.equal(heartbeats, 2);
+  assert.match(rt.completions[0].content, /今日任务已完成.*投币 5\/5.*大会员经验✅/);
+  assert.match(rt.notices.at(-1)[2], /账号等级经验 100 → 170/);
+  assert.match(rt.notices.at(-1)[2], /硬币余额 5/);
+  assert.ok(rt.calls.every(q => q['auto-cookie'] === false && q['auto-redirect'] === false && !q.policy));
+});
+
+test('daily: cached completion is invalidated when the login tool changes accounts', async () => {
+  const store = priorSession(true);
+  const rt = runtime('Betty-Bilibili-Daily', { store, respond: (q, m) => dailyResponse(q, m, { exp: 50 }) });
+  await rt.start();
+  store.set(SESSION, JSON.stringify({ version: 1, cookie: oldCookie.replace('DedeUserID=42', 'DedeUserID=84'), meta: { ...oldMeta, uid: '84' } }));
+  const auto = runtime('Betty-Bilibili-Daily', { store, trigger: 'auto-interval' });
+  await auto.start();assert.equal(auto.calls.length, 0);
+  assert.doesNotMatch(auto.completions[0].content, /今日任务已完成/);
+});
+
+test('daily: exhausted time budget before coin POST does not reserve an unsent coin', async () => {
+  let clock = sept11;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), now: () => clock, respond: (q, m) => {
+    if (q.url.includes('/archive/coins')) clock += 269000;
+    return dailyResponse(q, m);
+  } });
+  await rt.start();assert.equal(coinPosts(rt).length, 0);assert.equal(rt.store.has(COIN), false);
+  assert.match(rt.completions[0].content, /运行时间上限/);
 });

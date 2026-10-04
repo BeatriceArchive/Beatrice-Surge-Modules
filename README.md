@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
 | `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.3 |
-| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.10.0 |
+| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.11.0 |
 | `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.0 |
 
 ### 安装地址
@@ -94,10 +94,16 @@ YS=1&RISK=1
 - 观看、分享、投币分别核对官方状态，不把 HTTP 200 直接当成任务完成。
 - 分享同账号、同北京时间自然日最多一次写入；只有官方每日状态确认后才显示完成。
 - 投币根据今日已获得经验、当前整数余额和视频已投数量逐枚补足，最多 5 枚，不自动点赞。
+- 投币额度按账号和北京时间日期持久化；先保存再发送。超时、响应不明或进程中断后，当天停止投币，避免刷新时重复花币；次日自动恢复。
+- 接口接受投币与官方经验到账分别显示；余额不足、最终查询失败不会显示全部完成。
 - 大会员在观看任务完成后额外尝试领取每日 +10 主站账号等级经验。
-- 认证失效或明确风控错误时停止后续写操作，避免重复顶服务端。
+- 认证失效、账号封禁、明确风控 / 限流时停止后续请求；单项 `-403` 只停止对应操作，不误判整个 Cookie 失效。
+- 网络错误不标记 Cookie 失效。跨日、切换 Cookie、运行锁失效或达到 270 秒预算时结束本轮。
+- Panel 显示日期和脚本版本；自动刷新仅读本地结果，过日或换账号不会沿用旧完成状态。
 
 Daily 不监听 Cookie，也不需要 MITM。
+
+1.11.0 问题清单、恢复行为和验证边界见 [`docs/bilibili-daily-audit.md`](docs/bilibili-daily-audit.md)。08:00 cron 随设备时区调度；每日任务与去重记录使用北京时间。
 
 ### Betty-Bilibili-Cookie.sgmodule
 
