@@ -39,9 +39,9 @@ const state = share => ({ code: 0, data: { login: true, watch: true, share, coin
 test('share: API acceptance without task completion is not success', async () => {
   const rt = runtime('Betty-Bilibili-Daily', { respond: (_, method) => method === 'post' ? { code: 0 } : state(false) });
   const result = await shareRun(rt);
-  assert.match(result.message, /请求已接受.*未确认/);
+  assert.match(result.message, /经验待确认/);
   assert.equal(rt.calls.filter(x => x.method === 'post').length, 1);
-  assert.equal(rt.calls.length, 5);
+  assert.equal(rt.calls.length, 7);
   await shareRun(rt);
   assert.equal(rt.calls.filter(x => x.method === 'post').length, 1, 'same-day reentry never repeats the write');
 });
@@ -760,4 +760,98 @@ test('daily: exhausted time budget before coin POST does not reserve an unsent c
   } });
   await rt.start();assert.equal(coinPosts(rt).length, 0);assert.equal(rt.store.has(COIN), false);
   assert.match(rt.completions[0].content, /运行时间上限/);
+});
+
+test('share: a feed archive is shared directly without playback details or ranking', async () => {
+  let shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.includes('/ranking/') || q.url.includes('/view?')) assert.fail('Sharing must not require ranking or playback details');
+    if (m === 'post') { assert.ok(q.url.endsWith('/share/add'));shared = true;return { code: 0 }; }
+    if (q.url.includes('/feed/all')) return { code: 0, data: { items: [{ modules: { module_dynamic: { major: { archive: { bvid: video.bvid, aid: '123' } } } } }] } };
+    return dailyResponse(q, m, { exp: 50, money: 0, share: shared });
+  } });
+  await rt.start();assert.match(rt.completions[0].content, /今日任务已完成/);
+  const posts = rt.calls.filter(q => q.method === 'post');assert.equal(posts.length, 1);
+  assert.equal(new URLSearchParams(posts[0].body).get('aid'), '123');
+});
+
+test('share: coin candidate expansion cannot prevent an earlier eligible share', async () => {
+  let shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.includes('/ranking/')) { assert.ok(shared);return { code: -412 }; }
+    if (m === 'post') { assert.ok(q.url.endsWith('/share/add'));shared = true;return { code: 0 }; }
+    if (q.url.includes('/feed/all')) return { code: 0, data: { items: [{ modules: { module_dynamic: { major: { archive: { bvid: video.bvid, aid: '123' } } } } }] } };
+    return dailyResponse(q, m, { share: shared });
+  } });
+  await rt.start();assert.ok(shared);assert.equal(coinPosts(rt).length, 0);
+  assert.equal(JSON.parse(rt.store.get(SH)).confirmed, true);
+});
+
+for (const viewReply of [{ code: 0, data: { aid: 123 } }, null, { code: -403 }, http(503, '')]) {
+  test(`share: missing CID or unavailable view does not block a valid archive: ${JSON.stringify(viewReply)}`, async () => {
+    let shared = false;
+    const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => {
+      if (q.url.includes('/view?')) return viewReply;
+      if (m === 'post') { shared = true;return { code: 0 }; }
+      return state(shared);
+    } });
+    assert.equal(await rt.run("share(['BV1234567890'],null,'42','csrf-fixture','cookie-fixture')"), null);
+    const posts = rt.calls.filter(q => q.method === 'post');assert.equal(posts.length, 1);
+    const form = new URLSearchParams(posts[0].body);
+    assert.equal(form.get('source'), 'pc_client_normal');assert.equal(form.has('cid'), false);
+    if (viewReply?.code === 0) assert.equal(form.get('aid'), '123');
+    else { assert.equal(form.get('bvid'), video.bvid);assert.equal(form.has('aid'), false); }
+  });
+}
+
+test('share: deleted archive is skipped before consuming the daily POST', async () => {
+  let shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => {
+    if (q.url.includes('/view?')) return q.url.includes('BV1234567890') ? { code: -404 } : { code: 0, data: { aid: 987 } };
+    if (m === 'post') { assert.equal(new URLSearchParams(q.body).get('aid'), '987');shared = true;return { code: 0 }; }
+    return state(shared);
+  } });
+  assert.equal(await rt.run("share(['BV1234567890','BV0987654321'],null,'42','csrf','cookie')"), null);
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 1);
+});
+
+test('share: delayed accounting after twelve seconds succeeds without repeating POST', async () => {
+  let clock = sept11, postedAt = null;
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => clock, onSleep: ms => { clock += ms; }, respond: (q, m) => {
+    if (m === 'post') { postedAt = clock;return { code: 0 }; }
+    return state(postedAt !== null && clock - postedAt >= 12000);
+  } });
+  assert.equal(await shareRun(rt), null);
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 1);
+  assert.equal(JSON.parse(rt.store.get(SH)).confirmed, true);
+  assert.ok(clock - postedAt < 20000);
+});
+
+test('share: 71000 waits for official completion; it is never success by itself', async () => {
+  const noCredit = runtime('Betty-Bilibili-Daily', { respond: (q, m) => m === 'post' ? { code: 71000 } : state(false) });
+  const pending = await shareRun(noCredit);assert.equal(pending.pending, true);
+  let reads = 0;
+  const credited = runtime('Betty-Bilibili-Daily', { respond: (q, m) => m === 'post' ? { code: 71000 } : state(++reads >= 4) });
+  assert.equal(await shareRun(credited), null);
+  assert.equal(credited.calls.filter(q => q.method === 'post').length, 1);
+});
+
+test('share: a confirmed official state is not erased by a later stale false response', async () => {
+  let reads = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/exp/reward')) return state(++reads === 4);
+    return dailyResponse(q, m, { exp: 50, share: false });
+  } });
+  await rt.start();assert.match(rt.completions[0].content, /今日任务已完成/);
+  assert.equal(JSON.parse(rt.store.get(SH)).confirmed, true);
+  const again = runtime('Betty-Bilibili-Daily', { store: rt.store, respond: () => state(false) });
+  assert.equal(await shareRun(again), null);assert.equal(again.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share: pending delivery is visible and later refresh only confirms the existing attempt', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => dailyResponse(q, m, { exp: 50, share: false }) });
+  await rt.start();assert.match(rt.completions[0].content, /分享待确认/);
+  assert.match(rt.notices.at(-1)[2], /分享 ⏳ 待确认/);
+  const again = runtime('Betty-Bilibili-Daily', { store: rt.store, respond: () => state(true) });
+  assert.equal(await shareRun(again), null);assert.equal(again.calls.filter(q => q.method === 'post').length, 0);
 });
