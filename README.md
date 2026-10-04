@@ -55,18 +55,19 @@
 
 **Beatrice ENET Patch**
 
-在 ENET 原生托管配置上同时启用 **System + ENET Patch**，继续使用机场原订阅。System 保持不变，负责 VIF、IPv6、UDP 回退、ICMP 与代理共享；Patch 只添加 `hijack-dns`、媒体 `always-raw-tcp-hosts` 和 Bilibili DIRECT 规则。两个模块没有重叠 General 键，System 不含 Rule，二者先后顺序不影响结果。若另外启用会覆盖这些键或拦截 Bilibili 的模块，仍需检查 Surge 的“生效顺序”。
+在 ENET 原生托管配置上同时启用 **System + ENET Patch**，继续使用机场原订阅。System 保持不变，负责 VIF、IPv6、UDP 回退、ICMP 与代理共享；Patch 负责加密 DNS、硬编码 DNS 接管、Bilibili DIRECT、指定 STUN/HTTPDNS 防护及媒体 TCP 兼容。两个模块没有重叠 General 键，System 不含 Rule/Host，二者先后顺序不影响结果。其他模块若覆盖同名键或插入冲突规则，仍需检查 Surge 的“生效顺序”；出站须为 **Rule-Based**。
 
-- `hijack-dns = *:53` 接管进入 VIF 的硬编码 UDP DNS 查询，恢复 Fake IP 与域名分流；保留 ENET 的 DNS 上游、局域网及系统服务排除。它不解密应用自带 DoH/DoT，也不承诺拦截 TCP DNS。
-- ENET 当前 `doh-server` 是有效的旧别名，对应现代 `encrypted-dns-server`。普通实际解析继续走腾讯 DoH、默认 DIRECT；传统 DNS 仍用于 DoH 主机名引导与连通性检测，不能宣称“零明文 DNS”。代理域名通常交给远端解析，但 ENET 中需要解析的 IP/GEOIP 规则仍可能先触发本地 DoH。
-- 在 **Rule-Based** 模式下，主站、API、图片、视频、mcdn、UPOS、相关支付及国际版域名前置 DIRECT；共享 Akamai 只列精确 Bilibili 主机，不直连整个共享 CDN。`extended-matching` 仅补充可见的 SNI/HTTP Host，不能识别所有无域名的 IP/P2P 流量。
-- raw TCP 仅追加 `*.bilivideo.com:443`、`*.mcdn.bilivideo.cn:443` 与三个精确 Akamai UPOS 主机，跳过协议嗅探，不改 TLS/HTTP2 协商、不阻断 DIRECT QUIC。DNS 已保留域名的媒体连接不依赖 SNI；无域名连接若无法嗅探，不能保证匹配。
-- 不添加 STUN REJECT、全局 QUIC 封锁、MITM、Rewrite、Script、Panel、Proxy 或 Proxy Group。保留 captive portal 与网络切换的原有兼容路径；校园网、酒店认证及局域网私有域名仍需真机验证，遇到认证问题先关闭 Surge 完成认证。
-- **Not implemented: Module limitation** — 不改机场节点/策略组、不改 Snell 服务端、不强制 DoH 走未知代理组；不使用未经官方确认的空值关闭 controller，也不把 `proxy-restricted-to-lan` 当作 controller 的保护开关。ENET 的 controller 原值保留；Mac-only listener 与陈旧引擎参数不在此 iOS 补丁中处理。
+- 普通本地解析改为 Cloudflare DoH 的两个 IPv4 HTTPS 端点，旧 `doh-server` 与现代 `encrypted-dns-server` 同时设置为相同值，避免机场旧别名残留。`dns-server = system` 只供加密 DNS 引导例外和连通性检测；IP 形式的全局 DoH URL 不需要主机名引导。Bilibili 主站、视频和主要图片域名通过 `[Host] server:` 保留原腾讯 DoH，减少 CDN 调度变化；其 DoH 主机名仍可能通过系统 DNS 引导。DNS 服务商可见查询与直连出口，不能宣称“零明文 DNS”或“所有 DNS 经代理”。Cloudflare 端点在执行环境已验证 TLS、HTTP 200 和 DNS wireformat，手机当前网络可达性未验证；不可达时不能靠降级普通解析保证隐私。
+- `encrypted-dns-follow-outbound-mode = false` 避免经域名节点代理解析引发循环回退。**Not implemented: Module limitation** — 模块规则仅允许 DIRECT/REJECT/REJECT-TINYGIF，不能将 DNS 强制绑定 ENET 代理组；ENET 使用域名节点，官方还明确该情形可能回退 DIRECT。不能修改机场节点、提交其 IP/凭据或控制机场服务端 DNS。因此不能保证 DNS 测试仅显示代理出口对应的解析器。
+- `hijack-dns = *:53` 接管进入 VIF 的硬编码 UDP DNS 查询，恢复 Fake IP 与域名分流。它不解密应用自带 DoH/DoT，也不承诺拦截 TCP DNS。截图中的 Bilibili 明文 `/resolve?host=…` 查询由窄范围 URL-REGEX 拒绝，另拒绝 `httpdns.bilivideo.com`；不封共享解析服务 IP，也不干扰其他应用的查询。客户端是否回退 Surge DNS 必须实测；不回退的应用可能受影响。HTTPS URL 无 MITM 时不可检查，不能保证识别所有 HTTPDNS。
+- Bilibili 主站、API、图片、视频、mcdn、UPOS、相关支付、国际版及 `biligame.com/net` 前置 DIRECT；共享 Akamai 只列精确主机。`extended-matching` 仅补充可见 SNI/HTTP Host，不能识别所有无域名 IP/P2P 流量。
+- `stun.chat.bilibili.com` 在 DIRECT 规则之前按域名拒绝，并使用 `pre-matching` 阻断 DNS 阶段；这会阻止实测 Bilibili STUN 返回直连公网地址，也可能影响依赖该服务器的 Bilibili P2P/实时通信。其他 STUN 沿用原分流，不全局破坏 FaceTime、会议、游戏等功能；其他 DIRECT STUN 仍可能向网页返回直连地址。现有连接/缓存候选需通过重新启动测试会话复测。
+- raw TCP 范围保持不变，只追加两个视频通配项和三个精确 Akamai UPOS 主机。不改 TLS/HTTP2 协商，不阻断 DIRECT QUIC，不添加 MITM、Rewrite、Script、Panel、Proxy 或 Proxy Group。校园网/酒店认证、局域网私有域名与网络切换仍需真机验证。
+- **Not implemented: Module limitation** — 不改机场节点/策略组、Snell 服务端或 Bilibili 服务端历史属地；不使用未经官方确认的空值关闭 controller，也不把 `proxy-restricted-to-lan` 当作 controller 的保护开关。ENET 的 controller 原值保留；Mac-only listener 与陈旧引擎参数不在此 iOS 补丁中处理。
 
-核验日期：2026-10-05。依据：[官方 Module](https://manual.nssurge.com/profile/module.html)、[General](https://manual.nssurge.com/profile/general.html)、[DNS](https://manual.nssurge.com/dns/advanced.html)、[Encrypted DNS](https://manual.nssurge.com/dns/encrypted-dns.html)、[Domain Rules](https://manual.nssurge.com/rules/domain.html) 与 [HTTP Processing](https://manual.nssurge.com/http/overview.html)。交叉参考 [SukkaW/Surge](https://github.com/SukkaW/Surge)、[blackmatrix7](https://github.com/blackmatrix7/ios_rule_script)、[Rabbit-Spec](https://github.com/Rabbit-Spec/Surge)、[dler-io/Rules](https://github.com/dler-io/Rules) 和 [Hackl0us](https://github.com/Hackl0us/SS-Rule-Snippet) 的当时最新 HEAD；旧配置仅用于结构/域名比较，不继承旧默认值。DivineEngine 原地址不可用，以 dler-io 的现有规则交叉参考。
+核验日期：2026-10-05。依据：[官方 Module](https://manual.nssurge.com/profile/module.html)、[General](https://manual.nssurge.com/profile/general.html)、[DNS](https://manual.nssurge.com/dns/advanced.html)、[Encrypted DNS](https://manual.nssurge.com/dns/encrypted-dns.html)、[Host](https://manual.nssurge.com/dns/local-dns-mapping.html)、[Domain Rules](https://manual.nssurge.com/rules/domain.html)、[HTTP Rules](https://manual.nssurge.com/rules/http.html) 与 [Cloudflare DoH](https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/)。比较 [Rabbit-Spec DoH](https://github.com/Rabbit-Spec/Surge/tree/Master/Module/Spec/DoH)、[VirgilClyne DNS](https://github.com/VirgilClyne/GetSomeFries/wiki/🌐-DNS)、[HTTPDNSBlocker](https://github.com/iyujierbabe/surge/blob/main/HTTPDNSBlocker.sgmodule) 的模块覆盖、分域解析和明文 HTTPDNS 拒绝方式；[Maasea Bilibili Helper](https://github.com/Maasea/sgmodule/blob/master/Bilibili.Helper.sgmodule) 的 P2P 方案依赖 MITM/改写，未采用。域名继续交叉参考 SukkaW、blackmatrix7、Rabbit-Spec、dler-io 与 Hackl0us；仅补入当前请求证实且 blackmatrix7 列表包含的游戏域名。
 
-已核对模块静态语法、两个加载顺序的合并逻辑、域名命中范围与秘密检查。Bilibili 公共播放接口仍返回 `bilivideo.com` 和精确 Akamai UPOS；`io.hdslb.com` 在双源 DNS 查询中均为 NXDOMAIN，未照搬。未纳入缺少当前业务证据的 `bilicomics`、泛 CDN 根域及动态 P2P IP。未执行 iPhone/Surge 泄漏或播放测试；raw TCP 是否改善卡顿须真机 A/B。
+已核对静态语法、两种模块加载顺序、拒绝规则优先级、HTTPDNS 正/负样本、共享 CDN 排除及秘密检查。用户请求截图证实主站/API/媒体 DIRECT，视频为 TCP；新的 DNS/STUN/HTTPDNS 修正未在 iPhone/Surge 上执行复测，不能声称泄漏测试通过或播放不再卡顿。
 
 远程模块持续跟随上方稳定 `main` Raw 地址更新；机场托管配置更新与模块更新独立。禁用 Patch 即撤回其额外 DNS/规则/TCP 设置，禁用 System 可撤回通用基线。
 
