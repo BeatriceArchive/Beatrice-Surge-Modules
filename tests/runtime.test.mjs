@@ -3,6 +3,73 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
+test('share recovery: positive API 403 permits one cooled manual retry, HTTP 403 does not', async () => {
+  let clock = sept11;
+  const first = runtime('Betty-Bilibili-Daily', { now: () => clock, respond: (_, m) => m === 'post' ? { code: 403, message: '账号异常,操作失败' } : state(false) });
+  assert.match((await shareRun(first)).message, /手动刷新重试/);
+  clock += 60001;
+  const again = runtime('Betty-Bilibili-Daily', { now: () => clock, store: first.store, respond: (_, m) => m === 'post' ? { code: 403 } : state(false) });
+  await shareRun(again);
+  assert.equal(again.calls.filter(q => q.method === 'post').length, 1);
+  const blocked = runtime('Betty-Bilibili-Daily', { now: () => clock, respond: (_, m) => m === 'post' ? http(403, { code: 403 }) : state(false) });
+  await shareRun(blocked);clock += 60001;
+  const later = runtime('Betty-Bilibili-Daily', { now: () => clock, store: blocked.store, respond: () => state(false) });
+  await shareRun(later);assert.equal(later.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share: API rejection is reconciled with concurrent official completion', async () => {
+  let posted = false;
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (_, m) => {
+    if (m === 'post') { posted = true;return { code: -403 }; }
+    return state(posted);
+  } });
+  assert.equal(await shareRun(rt), null);
+  assert.equal(JSON.parse(rt.store.get(SH)).confirmed, true);
+});
+
+test('share: preflight completion persists over a later stale false response', async () => {
+  const store = new Map([[SH, JSON.stringify({ version: 3, day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false, tries: 2 })]]);
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => state(true) });
+  assert.equal(await shareRun(rt), null);
+  const stale = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => state(false) });
+  assert.equal(await shareRun(stale), null);
+  assert.equal(stale.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share: other rejected responses retain redacted HTTP and API diagnostics', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (_, m) => m === 'post' ? { code: -400, message: 'invalid archive' } : state(false) });
+  const result = await shareRun(rt);
+  assert.match(result.detail, /本轮已提交.*HTTP 200/);
+  assert.match(result.detail, /invalid archive/);
+});
+
+test('cookie: invalid notice overrides an old verified panel without network requests', async () => {
+  const store = priorSession(true);
+  store.set(CK + '.invalid_notice', '2026-10-07');
+  store.set(CK + '.panel_state', JSON.stringify({ title: 'old', content: 'Cookie 已验证' }));
+  const rt = runtime('Betty-Bilibili-Cookie', { store, trigger: 'auto-interval' });
+  await rt.start();assert.equal(rt.calls.length, 0);
+  assert.match(rt.completions[0].content, /已标记失效/);
+});
+
+test('cookie: a replaced login lock cannot commit session or clear the new QR/panel', async () => {
+  const store = priorSession(true);
+  const lock = CK + '.run_lock', pending = CK + '.pending_qr', panelKey = CK + '.panel_state';
+  const original = store.get(SESSION);
+  const rt = runtime('Betty-Bilibili-Cookie', { store, respond: q => {
+    if (q.url.endsWith('/nav')) {
+      store.set(lock, JSON.stringify({ owner: 'new-login', expiresAt: Date.now() + 60000 }));
+      store.set(pending, 'new-qr');store.set(panelKey, 'new-panel');
+    }
+    return loginResponse(q.url);
+  } });
+  await rt.start();
+  assert.equal(store.get(SESSION), original);
+  assert.equal(store.get(pending), 'new-qr');assert.equal(store.get(panelKey), 'new-panel');
+  assert.equal(JSON.parse(store.get(lock)).owner, 'new-login');
+  assert.match(rt.completions[0].content, /登录事务已失效/);
+});
+
 function runtime(name, { store = new Map(), respond = () => ({ code: 0 }), trigger = 'button', failStore = false, now = () => Date.now(), onWrite = () => {}, onSleep = () => {} } = {}) {
   const calls = [], notices = [], writes = [], completions = [];
   class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now()])); } static now() { return now(); } }

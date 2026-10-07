@@ -12,8 +12,8 @@
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
 | `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.3 |
-| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.11.2 |
-| `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.0 |
+| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.11.3 |
+| `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.1 |
 
 ### 安装地址
 
@@ -92,7 +92,7 @@ YS=1&RISK=1
 - 自动与手动入口共用同一任务逻辑和 TTL 运行锁。
 - 读取当天任务状态，只补做尚未完成的项目。
 - 观看、分享、投币分别核对官方状态，不把 HTTP 200 直接当成任务完成。
-- 分享默认每天一次提交；明确收到 API `-403` 拒绝后，间隔至少 60 秒可手动刷新补试一次，当天最多两次。cron 不补试，超时、HTTP 异常、结果不明或已被接受的请求不重复提交；只有官方每日状态确认后才显示完成。
+- 分享默认每天一次提交；明确收到 HTTP 2xx 内 API `403/-403` 拒绝后，间隔至少 60 秒可手动刷新补试一次，当天最多两次。cron 不补试，超时、HTTP 异常、结果不明或已被接受的请求不重复提交；只有官方每日状态确认后才显示完成。
 - 分享直接使用动态 / 排行榜提供的视频编号，不再依赖观看 CID；资料查询不可用时可用 BVID 提交。已有动态候选时，投币所需的排行榜补充放在分享之后。
 - 分享确认按累计约 19 秒等待间隔分批查询（另计请求耗时）；0 / 71000 不直接判完成，待到账会明确显示。当天已经确认的分享不会被后续较旧的 false 状态抹掉。拒绝通知区分历史失败与本轮提交，并保留北京时间、HTTP 状态及脱敏后的服务端信息。
 - 投币根据今日已获得经验、当前整数余额和视频已投数量逐枚补足，最多 5 枚，不自动点赞。
@@ -105,7 +105,7 @@ YS=1&RISK=1
 
 Daily 不监听 Cookie，也不需要 MITM。
 
-1.11.2 问题清单、恢复行为和验证边界见 [`docs/bilibili-daily-audit.md`](docs/bilibili-daily-audit.md)。08:00 cron 随设备时区调度；每日任务与去重记录使用北京时间。
+1.11.3 问题清单、恢复行为和验证边界见 [`docs/bilibili-daily-audit.md`](docs/bilibili-daily-audit.md)。08:00 cron 随设备时区调度；每日任务与去重记录使用北京时间。
 
 ### Betty-Bilibili-Cookie.sgmodule
 
@@ -187,3 +187,4 @@ tests/      mock Surge 行为测试
 未经 BeatriceArchive 事先书面许可，不得将本仓库代码或模块复制到其他仓库、网站、频道或软件包后重新发布；不得改名、换皮、删署名后作为自己的项目发布；不得公开分发修改版或其他衍生版本；不得冒充原创或用于商业销售与付费分发。
 
 完整条款见 [`LICENSE`](LICENSE)。第三方材料仍按各自原始许可证与版权声明执行。
+

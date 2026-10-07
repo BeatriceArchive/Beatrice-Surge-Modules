@@ -1,4 +1,26 @@
-# Bilibili Daily 1.11.2 审计与修复
+# Bilibili Daily 1.11.3 审计与修复
+
+## 2026-10-07 修复补充（Daily 1.11.3 / Cookie 1.5.1）
+
+当前源基线为 `5fb7149c484754ac4298b756364154db1f68c76e`。本次直接读取 GitHub 当前源码，复用原有账号/日期去重及投币预算，没有清空记录或更换登录方式。
+
+- **API 正数 403 恢复遗漏：** 当前 [API 收集文档](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/action.md)列出 `403`，原恢复判断只接受 `-403`。新实现对 HTTP 2xx 内的 `403/-403` 采用相同的 60 秒冷却、仅后续 Panel 按钮补试一次、每日最多两次的边界。HTTP 403、无时间/HTTP 证据的旧正数 403、未知结果、接受后待记账均不放开重试。
+- **拒绝与实际完成竞态：** 分享被拒后只额外查询一次官方每日状态，若另一客户端已完成则保存 `confirmed`；不会将拒绝码直接当成功。预检已完成也会更新当天已有记录，避免随后过期的 false 查询抹掉完成状态。
+- **其他失败丢失诊断：** 非 403 的失败也保留请求时间、HTTP 状态与脱敏服务端 message，区分本轮提交与历史结果。API code 仍在任务通知中显示。Cookie/Token 不写入通知或仓库。
+- **Cookie 状态显示失真：** 自动刷新时本地失效标记优先于缓存的“已验证”面板；不新增网络查询。
+- **Cookie 旧事务覆盖新事务：** 新会话持久化前重新核对运行锁所有权及有效期。已失去锁的旧实例不会提交会话、清除新二维码或覆盖新 Panel。
+
+重新对照的源码：
+
+| 来源 | 本次读取 | 结论 |
+| --- | --- | --- |
+| [BLTH API](https://github.com/andywang425/BLTH/blob/3fd9d80086f303985ec4d2dad7c9947861da2805/src/library/bili-api/index.ts)及分享任务 | 当前 master `3fd9d80086f303985ec4d2dad7c9947861da2805` | 仍使用 pc_client_normal / eab_x=2 / ramval=0 / ga=1；保留本仓既有表单，并继续独立核对官方记账 |
+| [BiliBiliToolPro 分享模型](https://github.com/RayWangQvQ/BiliBiliToolPro/blob/3db09a2960e2f6f831b1a74a2dcd64cd1f4a1304/src/Ray.BiliBiliTool.Agent/BiliBiliAgent/Dtos/ApiApi/Video/ShareVideoRequest.cs) | 当前 main `3db09a2960e2f6f831b1a74a2dcd64cd1f4a1304` | 仍是 web_normal；不能据此认定改回 Web 参数会修复当前账号 |
+| [Surge 官方脚本 API](https://manual.nssurge.com/scripting/api.html) | 当前页面 | 核对 HTTP status、auto-cookie、auto-redirect、Panel trigger 及持久化写入语义 |
+
+新增 6 项回归覆盖上述分支。全仓 426 项测试通过，模块检查、Config 契约与脚本语法通过。所有行为测试使用虚构 Cookie 和响应；没有当前手机的 Cookie 或实时分享响应，**本次修复了明确的客户端缺陷，未证明当前账号的服务端 -403 已解除**。不把旧实机成功记录或模拟测试当作当前实机成功。
+
+更新后 Daily Panel 显示 v1.11.3。若仍拒绝，应读取本轮新通知中的 HTTP/API code 与 message；不连续刷新突破限制，不修改投币预算。
 
 日期：2026-10-05（北京时间）。基线：远端 main `377440302ed0805051d842e8a39482484ddbcafa`，Daily 1.10.0、Cookie 1.5.0。
 

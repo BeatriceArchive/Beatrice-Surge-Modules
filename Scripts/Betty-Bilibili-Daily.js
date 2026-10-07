@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.11.2";
+const N="贝蒂的哔哩哔哩每日签到",V="1.11.3";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -179,7 +179,11 @@ async function share(list,watched,uid,csrf,cookie){
  const before=await get(A.daily,cookie,HOME,0),beforeError=classify(before,"分享状态");
  if(beforeError)return beforeError;
  if(!before||code(before)!==0||!before.data||typeof before.data.share!=="boolean")return op("分享",null,"无法查询任务状态，未执行写入");
- if(before.data.share)return null;
+ if(before.data.share){
+  const key=SHARE_KEY+uid;
+  try{const saved=JSON.parse($persistentStore.read(key)||"null");if(saved&&saved.day===shareDay()){saved.confirmed=true;$persistentStore.write(JSON.stringify(saved),key)}}catch(_){}
+  return null;
+ }
  const day=shareDay(),key=SHARE_KEY+uid;
  const saved=$persistentStore.read(key);let attempt=null;
  if(saved){
@@ -217,11 +221,18 @@ async function share(list,watched,uid,csrf,cookie){
  attempt.httpStatus=num(b&&b.__httpStatus);attempt.message=shareMessage(b&&(b.message||b.msg),cookie,csrf);
  if(!$persistentStore.write(JSON.stringify(attempt),key))attempt.tries=2;
  if(e&&e.fatal)return{...e,message:attempt.message||"B站拒绝了分享请求"};
- if(attempt.code===-403||attempt.code===403)return shareFailure(attempt,cookie,true);
- return confirmShare(cookie,attempt,key);
+ if(attempt.code===-403||attempt.code===403){
+  // A rejection is not completion, but another client may already have
+  // completed today's task. Reconcile once before showing the rejection.
+  const state=await get(A.daily,cookie,HOME,0),failure=classify(state,"分享确认");
+  if(failure&&failure.fatal)return failure;
+  if(state&&code(state)===0&&state.data&&state.data.share===true){attempt.confirmed=true;$persistentStore.write(JSON.stringify(attempt),key);return null}
+  return shareFailure(attempt,cookie,true);
+ }
+ return confirmShare(cookie,attempt,key,true);
 }
 function shareTries(a){return a.version===3?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
-function shareRejected(a){return a.code===-403&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&(a.version===3?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.version===2||a.version==null)}
+function shareRejected(a){return [403,-403].includes(a.code)&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&(a.version===3?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.code===-403&&(a.version===2||a.version==null))}
 function shareMessage(value,cookie,csrf){
  let s=String(value||"");const secrets=[csrf,...Object.values(parseCookie(cookie))].filter(v=>typeof v==="string"&&v.length>0).sort((a,b)=>b.length-a.length);
  for(const v of secrets){const tokens=[v,encodeURIComponent(v)];try{tokens.push(decodeURIComponent(v))}catch(_){}for(const token of tokens)if(token)s=s.split(token).join("[已隐藏]");}
@@ -247,7 +258,7 @@ async function shareVideo(bvid,cookie){
 }
 function shareDay(){return new Date(Date.now()+8*3600000).toISOString().slice(0,10)}
 function validShareDay(day){return typeof day==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day+"T00:00:00Z"))&&new Date(day+"T00:00:00Z").toISOString().slice(0,10)===day}
-async function confirmShare(cookie,attempt,key){
+async function confirmShare(cookie,attempt,key,fresh=false){
  for(const delay of [0,1200,2500,5000,10000]){
   if(delay)await sleep(delay);
   const b=await get(A.daily,cookie,HOME,0),e=classify(b,"分享确认");
@@ -255,7 +266,8 @@ async function confirmShare(cookie,attempt,key){
   if(b&&code(b)===0&&b.data&&b.data.share===true){attempt.confirmed=true;$persistentStore.write(JSON.stringify(attempt),key);return null}
  }
  const pending=attempt.requestSucceeded===true||attempt.code==null;
- return{...op("分享",attempt.code,pending?"分享结果未确定，经验待确认；再次刷新仅查询到账，不重复分享":"分享未确认；本地重复提交保护生效，今日不再提交"),pending};
+ const failure=shareFailure(attempt,cookie,fresh);
+ return{...op("分享",attempt.code,pending?"分享结果未确定，经验待确认；再次刷新仅查询到账，不重复分享":"分享未确认；本地重复提交保护生效，今日不再提交"),pending,...(!pending?{detail:failure.detail}:{})};
 }
 
 async function coins(list,goal,start,uid,csrf,cookie,balance=MAX){

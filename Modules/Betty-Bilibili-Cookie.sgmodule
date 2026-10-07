@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩 Cookie 获取
-#!desc=手动刷新创建新的 Bilibili 官方 Web 二维码登录事务，旧会话保留至新会话完整验证并保存；漏截图时再次刷新可重新显示当前仍有效的同一张二维码。登录、主站补全与验证按 Surge 当前策略出站，无需 MITM、CA 或 HTTPS 解密。
+#!desc=手动刷新创建新的 Bilibili 官方 Web 二维码登录事务，旧会话保留至新会话完整验证并保存，失效事务不覆盖新登录；漏截图时再次刷新可重新显示当前仍有效的同一张二维码。登录、主站补全与验证按 Surge 当前策略出站，无需 MITM、CA 或 HTTPS 解密。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.5.0
+# Version: 1.5.1
 # Project: Betty-Bilibili-Cookie
 # Copyright (c) 2026 BeatriceArchive
 # Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
@@ -13,3 +13,4 @@
 
 [Script]
 Betty-Bilibili-Cookie = type=generic,script-path=https://raw.githubusercontent.com/BeatriceArchive/Beatrice-Surge-Modules/main/Scripts/Betty-Bilibili-Cookie.js,timeout=240,script-update-interval=60
+

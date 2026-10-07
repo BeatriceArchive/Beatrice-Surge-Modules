@@ -1,5 +1,5 @@
 const NAME="贝蒂的哔哩哔哩 Cookie 获取";
-const VER="1.5.0";
+const VER="1.5.1";
 const CK="betty.bilibili.cookie";
 const SESSION="betty.bilibili.cookie.session";
 const META="betty.bilibili.cookie.meta";
@@ -23,9 +23,9 @@ const LOCK_TTL_MS=270000;
 let doneCalled=false;
 let lockOwner="";
 let lockHeld=false;
-let panel=readPanelState()||localPanel();main().finally(()=>{if(lockHeld)clearPendingQr();releaseLock();savePanelState(panel);finish(panel);});
+let panel=readPanelState()||localPanel();main().finally(()=>{const writable=!lockHeld||ownsLock();if(lockHeld&&writable)clearPendingQr();releaseLock();if(writable)savePanelState(panel);finish(panel);});
 
-async function main(){try{if(isAutoPanelRefresh()){panel=readPanelState()||localPanel();return;}if(isResetRequested()){
+async function main(){try{if(isAutoPanelRefresh()){panel=$persistentStore.read(BAD)?localPanel():(readPanelState()||localPanel());return;}if(isResetRequested()){
 if(!(await acquireLock())){panel=P("⚠️ 登录工具正在运行｜未重置会话","clock.fill","#FF9F0A");return;}
 resetStoredSession();clearPendingQr();panel=P("已按要求重置 Cookie｜刷新可重新扫码","key.fill","#8E8E93");return;
 }const pending=readPendingQr();if(pending){notifyQr(pending.url,true);panel=P("📱 二维码已重新显示｜请截图后用 Bilibili 扫码","qrcode","#0A84FF");return;}if(!(await acquireLock())){await sleep(220);
@@ -37,6 +37,9 @@ const missing=REQUIRED.filter(name=>!cookies[name]);if(missing.length){throw fai
 const nav=(await getJson(NAV,cookieHeader,true)).body;if(!isLoggedIn(nav)||String(nav.data.mid||"")!==String(cookies.DedeUserID||"")){throw failure("Cookie 验证失败","新会话未通过 Bilibili /nav 登录验证，本次不会保存。","cookie_invalid");}const meta={version:VER,schema:SESSION_SCHEMA,verified:true,updatedAt:Date.now(),source:"official-web-qr+home",uid:String(cookies.DedeUserID||""),buvid3Source};
 // One durable write publishes the complete verified pair. No login-in-progress
 // state is allowed to overwrite the previously committed session.
+if(!ownsLock()){
+throw failure("登录事务已失效","运行锁已过期或被新事务接管，未替换已保存会话。请重新扫码。","session_lock_lost");
+}
 if(!$persistentStore.write(JSON.stringify({version:1,cookie:cookieHeader,meta}),SESSION)){
 throw failure("保存失败","新会话未保存，原会话保持不变。","session_store_failed");
 }
@@ -179,6 +182,7 @@ function readLock(){const raw=$persistentStore.read(LOCK);if(!raw)return null;tr
 
 function releaseLock(){if(!lockHeld)return;
 const current=readLock();if(current&&current.owner===lockOwner)$persistentStore.write("",LOCK);lockHeld=false;lockOwner="";}
+function ownsLock(){const current=readLock();return !!(lockHeld&&current&&current.owner===lockOwner&&current.expiresAt>Date.now());}
 
 function isPanelCall(){return typeof $input==="object"&&$input&&$input.purpose==="panel";}
 
