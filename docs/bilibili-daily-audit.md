@@ -1,4 +1,24 @@
-# Bilibili Daily 1.11.3 审计与修复
+# Bilibili Daily 1.12.0 审计与修复
+
+## 2026-10-07 实机失败后续（1.12.0）
+
+用户最新截图已经加载 1.11.3：登录/观看/大会员任务完成，分享为历史 `-403`、HTTP 200、服务端“账号异常,操作失败”，请求时间 23:02:58，本轮未提交。投币为 1/5、余额 0，因此投币不足与分享失败是两件事；本次不更改投币上限或制造经验。
+
+基线 main 为 `e9b975f3802bbe8a44caaa2115ecdcfec28987c0`。重新读取其他实现后，本轮实际改变分享执行流程：
+
+1. 当前 [BiliBiliToolPro VideoDomainService](https://github.com/RayWangQvQ/BiliBiliToolPro/blob/3db09a2960e2f6f831b1a74a2dcd64cd1f4a1304/src/Ray.BiliBiliTool.DomainService/VideoDomainService.cs) 的 `WatchAndShareVideo` 在今日观看已完成、尚未分享时仍调用 `OpenVideo`；[单项恢复入口](https://github.com/RayWangQvQ/BiliBiliToolPro/blob/3db09a2960e2f6f831b1a74a2dcd64cd1f4a1304/src/Ray.BiliBiliTool.Web/Services/TaskRecoveryExecutor.cs) 也有同样的前置操作。原 Daily 在这一分支跳过心跳，直接 POST 分享。新实现先读取所选视频的播放资料，发送初始 played_time=0 心跳，再分享；本轮实际观看成功时直接复用该视频，避免重复心跳。
+2. 普通分享仍允许资料查询/普通打开失败后的 aid / bvid 直发，避免重新引入缺 CID 阻断分享的旧问题；认证与明确风控错误停止后续任务。这里的打开心跳仅建立请求上下文，不将其响应直接标为完成观看或分享。
+3. 截图中的旧版拒绝记录即使换脚本也会占满当天次数，因此增加一次受控迁移恢复：仅 v3、tries=2、HTTP 2xx 内明确 API 403/-403、未成功/未确认、冷却完成且后续 Panel 按钮触发。先保存 v4 的 repairUsed 标记，再准备；准备被拒、资料不可用、中断、写入失败均不能再次释放。只有本轮已打开视频得到确认，才保存 tries=3 的分享预留并发送一次。新 v4 记录仍最多两次；未知/成功/HTTP 错误不参与迁移，不随下一版再次迁移。
+4. 新拒绝通知显示本次视频打开是否得到确认，并保持官方每日 share=true 才完成的判定。
+
+其他方案的证据边界：
+
+- [BLTH 当前分享请求](https://github.com/andywang425/BLTH/blob/3fd9d80086f303985ec4d2dad7c9947861da2805/src/library/bili-api/index.ts)仍支持保留现有 PC-client 表单，而不是随意轮换参数。
+- [bilibili-api-zoku 请求层](https://github.com/bromothymolb/bilibili-api-zoku/blob/main/bilibili_api/utils/network.py)确实能获取并激活 buvid3/4，但激活使用大量固定浏览器指纹；其 bili_ticket 默认关闭。没有证据说明把这些指纹或票据塞进当前已验证的手机会话能解决分享 -403，本次没有复制它们，也不更换 buvid3。
+- [短链接口文档](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/misc/b23tv.md)中的 x/share/click 用于生成短链，不能把生成短链成功当作每日经验完成。
+- [BiliBiliToolPro #796](https://github.com/RayWangQvQ/BiliBiliToolPro/issues/796)仍是未关闭的同症状议题；IP/随机延迟的评论没有可复现的普遍修复证据。因此不宣称“别人的仓库保证能分享”，也不自动改出站策略。
+
+新增 7 项回归，覆盖截图分支、新上下文先于分享、旧记录唯一恢复、准备失败/存储失败不提交、普通回退、风控停止与不可迁移记录。全仓 433 项测试通过；本地模块/Config 契约/语法检查通过。请求顺序差异是代码事实，**它是当前 -403 根因仍属于待实机验证的假设**。真实手机新请求的 API/HTTP 与 official share 状态才是最终验收，模拟状态不能替代它。
 
 ## 2026-10-07 修复补充（Daily 1.11.3 / Cookie 1.5.1）
 

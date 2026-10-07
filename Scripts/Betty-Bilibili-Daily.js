@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.11.3";
+const N="贝蒂的哔哩哔哩每日签到",V="1.12.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -195,7 +195,7 @@ async function share(list,watched,uid,csrf,cookie){
    return op("分享",null,"尝试记录已修复；今日暂停分享写入，明日起恢复");
   }
  }
- let tries=1;
+ let tries=1,repair=false,priorAttempt=null;
  if(attempt&&attempt.day===day){
   if(attempt.confirmed===true)return null;
   const rejected=shareRejected(attempt),count=shareTries(attempt);
@@ -203,16 +203,33 @@ async function share(list,watched,uid,csrf,cookie){
   // press. Cron, ambiguous responses and accepted requests never retry.
   const manual=isPanel()&&typeof $trigger!=="undefined"&&$trigger==="button";
   const cooled=!attempt.submittedAt||Date.now()-attempt.submittedAt>=SHARE_RETRY_MS;
-  if(!rejected||!manual||count>=2||!cooled)return attempt.code===-403||attempt.code===403?shareFailure(attempt,cookie,false):confirmShare(cookie,attempt,key);
+  // One migration recovery is available only for an explicit v3 rejection
+  // that exhausted the old flow. It must establish the new video context
+  // first, and is durably consumed even if preparation fails or is killed.
+  repair=rejected&&manual&&cooled&&attempt.version===3&&count===2&&!attempt.repairUsed;
+  if(!rejected||!manual||!cooled||(count>=2&&!repair))return attempt.code===-403||attempt.code===403?shareFailure(attempt,cookie,false):confirmShare(cookie,attempt,key);
   tries=count+1;
+  priorAttempt=attempt;
  }
  let v=watched;
  if(!v)for(let i=0;i<Math.min(list.length,4);i++){v=await shareVideo(list[i],cookie);if(v)break}
  if(!v)return op("分享",null,"没有可用视频");
+ if(repair){
+  checkRun(TO*1000);
+  const reserved={...priorAttempt,version:4,repairUsed:true,repairReservedAt:Date.now(),context:"open-video-v1",opened:false,preparationOnly:true};
+  if(!$persistentStore.write(JSON.stringify(reserved),key))return op("分享",null,"无法保存恢复记录，未执行准备或分享写入");
+ }
+ const prepared=await openShareVideo(v,watched,uid,csrf,cookie);
+ if(prepared.err&&prepared.err.fatal)return prepared.err;
+ if(repair&&!prepared.opened){
+  const failure=shareFailure(priorAttempt,cookie,false);
+  return{...failure,message:"新视频打开未获确认，本轮未补试分享；今日不再补试",detail:failure.detail+"\n准备结果："+(prepared.err?prepared.err.message:"无法获取播放资料")};
+ }
+ v=prepared.video||v;
  // Persist before sending: a timeout or killed script must not cause another write.
  if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
  checkRun(TO*1000);
- attempt={version:3,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:""};
+ attempt={version:4,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:"",context:"open-video-v1",opened:prepared.opened,repairUsed:repair};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
  // Fixed task-oriented request, aligned with current BLTH. No parameter retries.
  const target=v.aid?{aid:v.aid}:{bvid:v.bvid};
@@ -231,19 +248,29 @@ async function share(list,watched,uid,csrf,cookie){
  }
  return confirmShare(cookie,attempt,key,true);
 }
-function shareTries(a){return a.version===3?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
-function shareRejected(a){return [403,-403].includes(a.code)&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&(a.version===3?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.code===-403&&(a.version===2||a.version==null))}
+async function openShareVideo(target,watched,uid,csrf,cookie){
+ if(watched&&watched.cid)return{opened:true,video:watched,err:null};
+ const v=target.cid?target:await video(target.bvid,cookie);
+ if(!v)return{opened:false,video:target,err:op("分享准备",null,"视频播放资料不可用")};
+ // Match BiliBiliToolPro's OpenVideo even when today's watch task is done.
+ // Playback metadata/open failure stays optional for ordinary sharing.
+ const response=await hb(v,uid,csrf,cookie,0,0),err=classify(response,"分享准备");
+ return{opened:code(response)===0,video:v,err:err||(code(response)===0?null:op("分享准备",code(response),reason(response,"打开视频结果未确认")))};
+}
+function shareTries(a){return [3,4].includes(a.version)?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
+function shareRejected(a){return [403,-403].includes(a.code)&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&([3,4].includes(a.version)?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.code===-403&&(a.version===2||a.version==null))}
 function shareMessage(value,cookie,csrf){
  let s=String(value||"");const secrets=[csrf,...Object.values(parseCookie(cookie))].filter(v=>typeof v==="string"&&v.length>0).sort((a,b)=>b.length-a.length);
  for(const v of secrets){const tokens=[v,encodeURIComponent(v)];try{tokens.push(decodeURIComponent(v))}catch(_){}for(const token of tokens)if(token)s=s.split(token).join("[已隐藏]");}
  return txt(s.replace(/https?:\/\/[^\s]+/gi,"[链接已隐藏]").replace(/[A-Za-z0-9_%+\/=.-]{24,}/g,"[已隐藏]"),100);
 }
 function shareFailure(a,cookie,fresh){
- const retry=shareRejected(a)&&shareTries(a)<2,remaining=a.submittedAt?Math.max(0,Math.ceil((a.submittedAt+SHARE_RETRY_MS-Date.now())/1000)):0;
- const recovery=retry?(remaining?remaining+" 秒后可手动刷新重试一次":"可手动刷新重试一次"):"今日不再提交分享";
+ const migration=shareRejected(a)&&a.version===3&&shareTries(a)===2&&!a.repairUsed;
+ const retry=shareRejected(a)&&shareTries(a)<2||migration,remaining=a.submittedAt?Math.max(0,Math.ceil((a.submittedAt+SHARE_RETRY_MS-Date.now())/1000)):0;
+ const recovery=retry?(remaining?remaining+" 秒后可手动刷新重试一次":migration?"可手动刷新，补开视频后恢复一次":"可手动刷新重试一次"):"今日不再提交分享";
  const when=Number.isFinite(a.submittedAt)&&a.submittedAt>0?new Date(a.submittedAt+8*3600000).toISOString().slice(11,19):"旧版未记录";
  const message=shareMessage(a.message,cookie,parseCookie(cookie).bili_jct)||"旧版未保留或响应无 message";
- return{...op("分享",a.code,"服务端拒绝分享；"+recovery),detail:(fresh?"本轮已提交":"历史失败，本轮未提交")+"｜请求时间 "+when+"（北京时间）｜HTTP "+(a.httpStatus==null?"未知":a.httpStatus)+"\n服务端信息："+message};
+ return{...op("分享",a.code,"服务端拒绝分享；"+recovery),detail:(fresh?"本轮已提交":"历史失败，本轮未提交")+"｜请求时间 "+when+"（北京时间）｜HTTP "+(a.httpStatus==null?"未知":a.httpStatus)+"\n服务端信息："+message+(a.context?"\n分享前打开视频："+(a.preparationOnly?"未确认，恢复已停止":a.opened?"已确认":"未确认，已降级直发"):"")};
 }
 // Sharing needs an archive identifier, not the playback CID/duration. Prefer
 // identifiers already returned by the official feed; a view failure must not
@@ -253,8 +280,8 @@ async function shareVideo(bvid,cookie){
  if(videoHints[bvid])return videoHints[bvid];
  const b=await get(A.view+"?bvid="+encodeURIComponent(bvid),cookie,HOME+"video/"+bvid,0);checkRead(b,"分享视频查询");
  if([-404,62002,62004].includes(code(b)))return null;
- const aid=code(b)===0?num(b.data&&b.data.aid):null;
- return Number.isSafeInteger(aid)&&aid>0?{aid,bvid}:{bvid};
+ const data=code(b)===0&&b.data?b.data:null,aid=num(data&&data.aid),cid=num(data&&(data.cid||(Array.isArray(data.pages)&&data.pages[0]&&data.pages[0].cid)));
+ return Number.isSafeInteger(aid)&&aid>0?{aid,bvid,...(cid>0?{cid}:{})}:{bvid};
 }
 function shareDay(){return new Date(Date.now()+8*3600000).toISOString().slice(0,10)}
 function validShareDay(day){return typeof day==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day+"T00:00:00Z"))&&new Date(day+"T00:00:00Z").toISOString().slice(0,10)===day}

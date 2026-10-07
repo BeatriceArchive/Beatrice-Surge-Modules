@@ -3,6 +3,109 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
+function exhaustedShare(overrides = {}) {
+  return { version: 3, day: '2026-09-11', tries: 2, submittedAt: sept11 - 120000,
+    httpStatus: 200, code: -403, requestSucceeded: false, confirmed: false,
+    message: '账号异常,操作失败', ...overrides };
+}
+const sharePosts = rt => rt.calls.filter(q => q.method === 'post' && q.url.endsWith('/share/add'));
+const heartbeats = rt => rt.calls.filter(q => q.method === 'post' && q.url.includes('/heartbeat'));
+
+test('share context: completed watch still opens the selected archive before sharing', async () => {
+  let opened = false, shared = false;
+  const store = priorSession(true), original = store.get(SESSION);
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, m) => {
+    if (q.url.includes('/heartbeat')) {
+      const f = new URLSearchParams(q.body);
+      assert.equal(f.get('played_time'), '0');assert.equal(f.get('cid'), '456');
+      opened = true;return { code: 0 };
+    }
+    if (q.url.endsWith('/share/add')) { assert.ok(opened);shared = true;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: 50, money: 0, watch: true, share: shared });
+  } });
+  await rt.start();
+  assert.equal(heartbeats(rt).length, 1);assert.equal(sharePosts(rt).length, 1);
+  assert.equal(coinPosts(rt).length, 0);assert.equal(store.get(SESSION), original);
+  assert.match(rt.completions[0].content, /今日任务已完成/);
+});
+
+test('share context: screenshot v3 exhausted rejection gets one prepared recovery, never a fourth share', async () => {
+  const store = priorSession(true);store.set(SH, JSON.stringify(exhaustedShare()));
+  let opened = false, shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, m) => {
+    if (q.url.includes('/heartbeat')) {
+      assert.equal(JSON.parse(store.get(SH)).repairUsed, true, 'reserve recovery before opening');
+      opened = true;return { code: 0 };
+    }
+    if (q.url.endsWith('/share/add')) {
+      assert.ok(opened);assert.equal(JSON.parse(store.get(SH)).tries, 3);
+      shared = true;return { code: 0 };
+    }
+    return dailyResponse(q, m, { exp: 50, money: 0, share: shared });
+  } });
+  await rt.start();assert.equal(sharePosts(rt).length, 1);
+  const record = JSON.parse(store.get(SH));
+  assert.equal(record.version, 4);assert.equal(record.tries, 3);
+  assert.equal(record.opened, true);assert.equal(record.confirmed, true);
+  assert.match(rt.completions[0].content, /今日任务已完成/);
+  const repeated = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => state(false) });
+  assert.equal(await shareRun(repeated), null);assert.equal(sharePosts(repeated).length, 0);
+});
+
+test('share context: failed opening consumes migration without sharing or repeated preparation', async () => {
+  const store = new Map([[SH, JSON.stringify(exhaustedShare())]]);
+  const options = { store, now: () => sept11, respond: (q, m) => {
+    if (q.url.includes('/view?')) return { code: 0, data: video };
+    if (m === 'post') { assert.ok(q.url.includes('/heartbeat'));return { code: -403 }; }
+    return state(false);
+  } };
+  const first = runtime('Betty-Bilibili-Daily', options);
+  assert.match((await first.run("share(['BV1234567890'],null,'42','csrf','cookie')")).message, /本轮未补试/);
+  assert.equal(heartbeats(first).length, 1);assert.equal(sharePosts(first).length, 0);
+  assert.equal(JSON.parse(store.get(SH)).version, 4);
+  const repeated = runtime('Betty-Bilibili-Daily', options);
+  await repeated.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+  assert.equal(repeated.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share context: recovery reserve failure cannot issue even an opening heartbeat', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { store: new Map([[SH, JSON.stringify(exhaustedShare())]]), now: () => sept11,
+    failStore: key => key === SH, respond: q => q.url.includes('/view?') ? { code: 0, data: video } : state(false) });
+  assert.match((await rt.run("share(['BV1234567890'],null,'42','csrf','cookie')")).message, /无法保存恢复记录/);
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('share context: ordinary opening failure permits the existing direct share fallback', async () => {
+  let shared = false;
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => {
+    if (q.url.includes('/view?')) return { code: 0, data: video };
+    if (q.url.includes('/heartbeat')) return null;
+    if (m === 'post') { shared = true;return { code: 0 }; }
+    return state(shared);
+  } });
+  assert.equal(await rt.run("share(['BV1234567890'],null,'42','csrf','cookie')"), null);
+  assert.equal(sharePosts(rt).length, 1);assert.equal(heartbeats(rt).length, 1);
+  assert.equal(JSON.parse(rt.store.get(SH)).opened, false);
+});
+
+test('share context: risk rejection on opening stops before the share', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => q.url.includes('/view?') ? { code: 0, data: video } : m === 'post' ? { code: -412 } : state(false) });
+  const result = await rt.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+  assert.equal(result.fatal, true);assert.equal(sharePosts(rt).length, 0);
+});
+
+test('share context: accepted, ambiguous, HTTP, newer and cron attempts cannot use migration recovery', async () => {
+  for (const [overrides, trigger] of [
+    [{ code: 0, requestSucceeded: true }, 'button'],
+    [{ code: null }, 'button'],[{ httpStatus: 403 }, 'button'],
+    [{ version: 4 }, 'button'],[{ submittedAt: null }, 'button'],
+    [{ tries: 3 }, 'button'],[{}, 'auto-interval'],
+  ]) {
+    const rt = runtime('Betty-Bilibili-Daily', { store: new Map([[SH, JSON.stringify(exhaustedShare(overrides))]]), trigger, now: () => sept11, respond: () => state(false) });
+    await shareRun(rt);assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+  }
+});
+
 test('share recovery: positive API 403 permits one cooled manual retry, HTTP 403 does not', async () => {
   let clock = sept11;
   const first = runtime('Betty-Bilibili-Daily', { now: () => clock, respond: (_, m) => m === 'post' ? { code: 403, message: '账号异常,操作失败' } : state(false) });
@@ -503,6 +606,7 @@ test('daily: verified session sends the device-confirmed PC-client form and comp
   let shared = false;
   const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, method) => {
     assert.equal(q.headers.Cookie, oldCookie);
+    if (q.url.includes('/heartbeat')) return { code: 0 };
     if (method === 'post') {
       assert.equal(new URL(q.url).pathname, '/x/web-interface/share/add');
       assert.equal(JSON.parse(store.get(SH)).day, '2026-09-11', 'formal guard must precede POST');
@@ -515,7 +619,7 @@ test('daily: verified session sends the device-confirmed PC-client form and comp
     return { code: 0, data: { items: [], list: [video] } };
   } });
   await rt.start();
-  const posts = rt.calls.filter(q => q.method === 'post');
+  const posts = rt.calls.filter(q => q.method === 'post' && q.url.endsWith('/share/add'));
   assert.equal(posts.length, 1);
   assert.deepEqual(Object.fromEntries(new URLSearchParams(posts[0].body)), {
     aid: '123', csrf: 'old-csrf', source: 'pc_client_normal', eab_x: '2', ramval: '0', ga: '1'
@@ -830,10 +934,11 @@ test('daily: exhausted time budget before coin POST does not reserve an unsent c
   assert.match(rt.completions[0].content, /运行时间上限/);
 });
 
-test('share: a feed archive is shared directly without playback details or ranking', async () => {
+test('share: a feed archive still shares without available playback details or ranking', async () => {
   let shared = false;
   const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
-    if (q.url.includes('/ranking/') || q.url.includes('/view?')) assert.fail('Sharing must not require ranking or playback details');
+    if (q.url.includes('/ranking/')) assert.fail('Sharing must not require ranking');
+    if (q.url.includes('/view?')) return { code: -403 };
     if (m === 'post') { assert.ok(q.url.endsWith('/share/add'));shared = true;return { code: 0 }; }
     if (q.url.includes('/feed/all')) return { code: 0, data: { items: [{ modules: { module_dynamic: { major: { archive: { bvid: video.bvid, aid: '123' } } } } }] } };
     return dailyResponse(q, m, { exp: 50, money: 0, share: shared });
@@ -847,6 +952,7 @@ test('share: coin candidate expansion cannot prevent an earlier eligible share',
   let shared = false;
   const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
     if (q.url.includes('/ranking/')) { assert.ok(shared);return { code: -412 }; }
+    if (q.url.includes('/heartbeat')) return { code: 0 };
     if (m === 'post') { assert.ok(q.url.endsWith('/share/add'));shared = true;return { code: 0 }; }
     if (q.url.includes('/feed/all')) return { code: 0, data: { items: [{ modules: { module_dynamic: { major: { archive: { bvid: video.bvid, aid: '123' } } } } }] } };
     return dailyResponse(q, m, { share: shared });
@@ -933,7 +1039,7 @@ test('share recovery: screenshot-era explicit rejection permits one manual retry
   } });
   assert.equal(await shareRun(rt), null);
   await shareRun(rt);
-  assert.equal(rt.calls.filter(x => x.method === 'post').length, 1);
+  assert.equal(rt.calls.filter(x => x.method === 'post' && x.url.endsWith('/share/add')).length, 1);
   assert.equal(JSON.parse(store.get(SH)).confirmed, true);
 });
 
@@ -1001,7 +1107,7 @@ test('share recovery: normal entry migrates saved -403 and surfaces a new reject
   store.set(SH, JSON.stringify({ version: 2, day: '2026-09-11', code: -403, requestSucceeded: false, confirmed: false }));
   const rt = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: (q, m) => dailyResponse(q, m, { exp: 10, money: 0, share: false, post: { code: -403, message: '访问权限不足' } }) });
   await rt.start();
-  assert.equal(rt.calls.filter(x => x.method === 'post').length, 1);
+  assert.equal(rt.calls.filter(x => x.method === 'post' && x.url.endsWith('/share/add')).length, 1);
   assert.equal(coinPosts(rt).length, 0);
   assert.match(rt.notices[0][2], /本轮已提交.*HTTP 200/);
   assert.match(rt.notices[0][2], /服务端信息：访问权限不足/);
