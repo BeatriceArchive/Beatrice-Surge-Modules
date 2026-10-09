@@ -1198,3 +1198,31 @@ for (const mode of ['budget', 'api', 'http-error']) {
     }
   });
 }
+
+for (const task of ['share', 'watch']) {
+  for (const confirmed of [false, true]) {
+    test(`daily: final ${task} confirmation reconciles only recovered task errors (${confirmed})`, async () => {
+      let reads = 0;
+      const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+        if (q.url.endsWith('/exp/reward')) {
+          reads++;
+          const done = confirmed && reads >= (task === 'share' ? 9 : 3);
+          return dailyResponse(q, m, { exp: 50, watch: task === 'watch' ? done : true, share: task === 'share' ? done : true });
+        }
+        if (task === 'watch' && q.url.includes('/heartbeat')) return { code: -403 };
+        return dailyResponse(q, m, { exp: 50 });
+      } });
+      await rt.start();
+      const notice = rt.notices.at(-1)[2];
+      if (confirmed) {
+        assert.match(rt.completions[0].content, /今日任务已完成/);
+        assert.doesNotMatch(notice, /异常：/);
+      } else {
+        assert.match(rt.completions[0].content, /部分完成/);
+        assert.match(notice, /异常：/);
+      }
+      assert.equal(coinPosts(rt).length, 0);
+      assert.equal(sharePosts(rt).length, task === 'share' ? 1 : 0);
+    });
+  }
+}
