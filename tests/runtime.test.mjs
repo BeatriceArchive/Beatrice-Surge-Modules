@@ -837,7 +837,7 @@ test('coins: reservations are per UID and stop on missing live EXP', async () =>
 test('coins: balance and already-donated video limits remain enforced', async () => {
   const rt = runtime('Betty-Bilibili-Daily', { respond: dailyResponse });
   const result = await rt.run("coins(['BV1234567890','BV1234567891','BV1234567892'],5,0,'42','csrf','cookie',2)");
-  assert.equal(result.spent, 2);assert.equal(result.err.code, -104);
+  assert.equal(result.spent, 2);assert.equal(result.err, null);assert.equal(result.meta.balanceLimited, true);
   for (const data of [{ multiply: 2 }, { multiply: null }, { multiply: false }]) {
     const capped = runtime('Betty-Bilibili-Daily', { respond: (q, m) => q.url.includes('/archive/coins') ? { code: 0, data } : dailyResponse(q, m) });
     await coinRun(capped);assert.equal(coinPosts(capped).length, 0);
@@ -1171,3 +1171,30 @@ test('share recovery: normal entry migrates saved -403 and surfaces a new reject
   assert.ok(!rt.notices[0][2].includes('写入次数已用尽'));
   assert.equal(store.get(CK), oldCookie);
 });
+
+for (const mode of ['budget', 'api', 'http-error']) {
+  test(`daily: coin balance stop is separate from request failure (${mode})`, async () => {
+    let accepted = 0;
+    const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+      if (m === 'post' && q.url.endsWith('/coin/add')) {
+        if (mode === 'api') return { code: -104 };
+        if (mode === 'http-error') return http(503, { code: -104 });
+        accepted++;return { code: 0 };
+      }
+      return dailyResponse(q, m, { money: mode === 'budget' ? 1 - accepted : 5, exp: accepted * 10 });
+    } });
+    await rt.start();
+    assert.equal(coinPosts(rt).length, 1);
+    const notice = rt.notices.at(-1)[2];
+    assert.match(rt.completions[0].content, /部分完成/);
+    if (mode === 'http-error') {
+      assert.match(notice, /异常：投币 code 503/);
+      assert.equal(JSON.parse(rt.store.get(COIN)).pending, true);
+    } else {
+      assert.match(notice, /余额不足/);
+      assert.doesNotMatch(notice, /异常：|code -104/);
+      assert.match(notice, new RegExp('明确成功 ' + accepted + ' 枚'));
+      assert.equal(JSON.parse(rt.store.get(COIN)).pending, false);
+    }
+  });
+}

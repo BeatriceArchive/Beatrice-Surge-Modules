@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
 | `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.3 |
-| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.12.1 |
+| `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.12.2 |
 | `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.5.1 |
 
 ### 安装地址
@@ -108,7 +108,7 @@ YS=1&RISK=1
 
 Daily 不监听 Cookie，也不需要 MITM。
 
-1.12.1 问题清单、恢复行为和验证边界见 [`docs/bilibili-daily-audit.md`](docs/bilibili-daily-audit.md)。08:00 cron 随设备时区调度；每日任务与去重记录使用北京时间。
+1.12.2 问题清单、恢复行为和验证边界见 [`docs/bilibili-daily-audit.md`](docs/bilibili-daily-audit.md)。08:00 cron 随设备时区调度；每日任务与去重记录使用北京时间。
 
 ### Betty-Bilibili-Cookie.sgmodule
 
