@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.12.1";
+const N="贝蒂的哔哩哔哩每日签到",V="1.13.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -27,7 +27,7 @@ const A={
 };
 let done=false,owner="",held=false,runDay="",runCookie="",deadline=0;
 const videoHints=Object.create(null);
-let rankFetched=false;
+let rankFetched=false,wbiKey="";
 let panel=readState()||P("每天 08:00 自动执行｜点击刷新立即运行","calendar.badge.checkmark","#8E8E93");
 main().finally(()=>{try{if(held)saveState(panel);unlock()}finally{finish(panel)}});
 
@@ -62,6 +62,7 @@ async function run(){
   else{panel=P("⚠️ 登录状态查询失败｜Cookie 未标记失效","exclamationmark.triangle.fill","#FF9F0A");notify("登录状态查询失败",reason(nav,"网络异常或响应不可识别")+"；本轮未执行任务写入。");}return;
  }
  const user=nav.data,uid=String(user.mid||"");
+ wbiKey=wbiMixin(user.wbi_img);
  if(String(meta.uid)!==uid||cm.DedeUserID!==uid){bad("Cookie UID 与验证标记不一致");return}
  $persistentStore.write("",BK);
  const csrf=cm.bili_jct,bal0=int(user.money),levelExp0=currentLevelExp(user);
@@ -107,7 +108,7 @@ async function run(){
  const nav2=await get(A.nav,cookie,HOME,1);checkRead(nav2,"最终账号查询");const nav2ok=logged(nav2)&&String(nav2.data.mid)===uid;
  const bal=nav2ok?int(nav2.data.money):null;
  const levelExp1=nav2ok?currentLevelExp(nav2.data):null;
- const limited=fc!==null&&fc<MAX&&(bal===0||coinErr&&coinErr.code===-104),coinOK=fc!==null&&fc>=MAX;
+ const limited=fc!==null&&fc<MAX&&(bal===0||coinMeta&&coinMeta.balanceLimited),coinOK=fc!==null&&fc>=MAX;
  const coreOK=!!(finalStatus&&st.login&&st.watch&&coinOK&&vip.done!==false),shareOK=!!st.share,ct=fc===null?"未知/5":fc+"/5";
  const daily0=taskExp(st0,fx0,c0),daily1=taskExp(finalStatus?st:null,fx,fc),vipShort=vipPanel(vip);
  if(coreOK&&shareOK){
@@ -117,7 +118,7 @@ async function run(){
   panel=P([finalStatus?"⚠️ 今日任务部分完成":"⚠️ 最终状态未确认","投币 "+ct+(limited?"（余额不足）":""),shareOK?"分享✅":shareErr&&shareErr.pending?"分享待确认":"分享❌",vipShort].join("｜"),"exclamationmark.triangle.fill","#FF9F0A");
  }
  const lines=[
-  taskNotice("登录",st0.login,st.login,null),
+  taskNotice("登录奖励",st0.login,st.login,st.login?null:op("登录奖励",null,"账号已登录，官方每日登录奖励未确认")),
   taskNotice("观看",st0.watch,st.watch,watchErr),
   vipNotice(vip),
   taskNotice("分享",st0.share,st.share,shareErr),
@@ -127,7 +128,10 @@ async function run(){
   "硬币余额 "+(bal===null?"未知":bal)
  ];
  if(!finalStatus)lines.push("最终每日任务查询失败；上列登录/观看/分享为本轮较早状态，不代表最终确认。");
- if(errs.length)lines.push("异常："+errs.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
+ // Only a fresh official task confirmation resolves watch/share errors.
+ // Coin write failures and VIP claim errors retain their own evidence.
+ const unresolved=errs.filter(e=>!(finalStatus&&((e===watchErr&&finalStatus.watch)||(e===shareErr&&finalStatus.share))));
+ if(unresolved.length)lines.push("异常："+unresolved.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
  notify(coreOK&&shareOK?"✅ 今日可执行任务已完成":"⚠️ 今日任务部分完成",lines.join("\n"));
 }
 
@@ -173,17 +177,62 @@ function add(a,s,v,h){if(typeof v!=="string"||!/^BV[0-9A-Za-z]{8,20}$/.test(v)||
 async function video(bvid,cookie){const b=await get(A.view+"?bvid="+encodeURIComponent(bvid),cookie,HOME+"video/"+bvid,0);checkRead(b,"视频资料查询");if(!b||code(b)!==0||!b.data)return null;const d=b.data,aid=num(d.aid),pg=Array.isArray(d.pages)&&d.pages[0],cid=num(d.cid||(pg&&pg.cid)),duration=int((pg&&pg.duration)||d.duration),ownerMid=d.owner?num(d.owner.mid):null,copyright=int(d.copyright);return aid>0&&cid>0?{aid,cid,bvid,duration,ownerMid,copyright}:null}
 
 async function watch(list,uid,csrf,cookie){
+ let last=op("观看",null,"没有可用视频，未发送心跳");
  for(let i=0;i<Math.min(list.length,5);i++){
   const v=await video(list[i],cookie);if(!v)continue;
-  let b=await hb(v,uid,csrf,cookie,0,0),e=classify(b,"观看");if(e)return{err:e,video:null};if(code(b)!==0)continue;
-  await sleep(800);const t=rand(1,Math.max(1,Math.min(15,v.duration||15)));
+  let b=await hb(v,uid,csrf,cookie,0,0),e=classify(b,"观看");if(e)return{err:e,video:null};
+  if(code(b)!==0){last=watchFailure(b,cookie,"打开视频失败");continue}
+  const t=Math.max(1,Math.min(30,v.duration||30));
+  await sleep(t*1000);
   b=await hb(v,uid,csrf,cookie,t,t);e=classify(b,"观看");if(e)return{err:e,video:null};
-  if(code(b)===0){await sleep(500);const s=await status(cookie,0);if(s&&s.watch)return{err:null,video:v}}
-  if(code(b)===null){await sleep(500);const s=await status(cookie,0);if(s&&s.watch)return{err:null,video:v}}
+  if(code(b)!==0&&code(b)!==null)return{err:watchFailure(b,cookie,"观看心跳失败"),video:null};
+  // Accepted or ambiguous progress must be reconciled before any new video.
+  for(const delay of [1200,2500,5000]){
+   await sleep(delay);const state=await status(cookie,0);
+   if(state&&state.watch)return{err:null,video:v};
+  }
+  return{err:{...watchFailure(b,cookie,"观看心跳已提交，官方任务仍未确认"),pending:true},video:null};
  }
- return{err:op("观看",null,"未确认观看完成"),video:null};
+ return{err:last,video:null};
 }
-function hb(v,uid,csrf,cookie,t,rt){return postForm(A.hb+"?aid="+encodeURIComponent(v.aid)+"&played_time="+t,form({aid:v.aid,bvid:v.bvid,cid:v.cid,mid:uid,played_time:t,realtime:rt,real_played_time:rt,start_ts:Math.floor(Date.now()/1000)-rt,type:3,dt:2,play_type:3,csrf}),cookie,HOME+"video/"+v.bvid)}
+function watchFailure(b,cookie,message){return{...op("观看",code(b),message),detail:"HTTP "+(num(b&&b.__httpStatus)??"未知")+"｜心跳 "+(wbiKey?"WBI 签名":"兼容模式（未取得签名密钥）")+"｜响应 "+(shareMessage(b&&(b.message||b.msg),cookie,parseCookie(cookie).bili_jct)||"无信息")}}
+function hb(v,uid,csrf,cookie,t,rt){
+ if(t===0||!Number.isFinite(v.startTs))v.startTs=Math.floor(Date.now()/1000);
+ const fields={aid:v.aid,bvid:v.bvid,cid:v.cid,mid:uid,played_time:t,realtime:rt,real_played_time:rt,start_ts:v.startTs,type:3,dt:2,play_type:t===0?1:0,csrf};
+ let query="aid="+encodeURIComponent(v.aid)+"&played_time="+t;
+ if(wbiKey){
+  Object.assign(fields,{video_duration:v.duration||0,last_play_progress_time:t,max_play_progress_time:t,mobi_app:"web",device:"web",platform:"web",spmid:"333.788.0.0"});
+  query=wbiQuery({w_start_ts:fields.start_ts,w_mid:uid,w_aid:v.aid,w_dt:2,w_realtime:rt,w_played_time:t,w_real_played_time:rt,w_video_duration:fields.video_duration,w_last_play_progress_time:t,web_location:1315873},wbiKey);
+ }
+ v.signed=!!wbiKey;
+ return postForm(A.hb+"?"+query,form(fields),cookie,HOME+"video/"+v.bvid);
+}
+function wbiMixin(data){
+ const keys=[data&&data.img_url,data&&data.sub_url].map(u=>typeof u==="string"&&u.match(/\/([a-f0-9]{32})\.[a-z0-9]+(?:\?.*)?$/i));
+ if(keys.some(k=>!k))return "";
+ const raw=keys.map(k=>k[1]).join(""),order=[46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13];
+ return order.map(i=>raw[i]).join("");
+}
+function wbiQuery(params,key){const q={...params,wts:Math.floor(Date.now()/1000)},query=Object.keys(q).sort().map(k=>encodeURIComponent(k)+"="+encodeURIComponent(String(q[k]).replace(/[!'()*]/g,""))).join("&");return query+"&w_rid="+md5Ascii(query+key)}
+// WBI hashes percent-encoded (ASCII) query strings; no runtime dependency.
+function md5Ascii(text){
+ const bytes=Array.from(text,c=>c.charCodeAt(0));if(bytes.some(b=>b>127))throw new Error("Non-ASCII digest input");
+ const bits=bytes.length*8;bytes.push(128);while(bytes.length%64!==56)bytes.push(0);
+ for(let i=0;i<8;i++)bytes.push(Math.floor(bits/Math.pow(256,i))&255);
+ const h=[0x67452301,0xefcdab89,0x98badcfe,0x10325476],shifts=[7,12,17,22,5,9,14,20,4,11,16,23,6,10,15,21];
+ for(let offset=0;offset<bytes.length;offset+=64){
+  const words=Array.from({length:16},(_,j)=>{const k=offset+j*4;return bytes[k]|bytes[k+1]<<8|bytes[k+2]<<16|bytes[k+3]<<24});
+  let [a,b,c,d]=h;
+  for(let i=0;i<64;i++){
+   const group=i>>4,g=group===0?i:group===1?(5*i+1)%16:group===2?(3*i+5)%16:7*i%16;
+   const f=group===0?(b&c)|(~b&d):group===1?(d&b)|(~d&c):group===2?b^c^d:c^(b|~d);
+   const x=(a+f+Math.floor(Math.abs(Math.sin(i+1))*4294967296)+words[g])|0,n=shifts[group*4+i%4],next=(b+((x<<n)|(x>>>(32-n))))|0;
+   a=d;d=c;c=b;b=next;
+  }
+  [a,b,c,d].forEach((v,i)=>{h[i]=(h[i]+v)|0});
+ }
+ return h.map(v=>[0,8,16,24].map(n=>((v>>>n)&255).toString(16).padStart(2,"0")).join("")).join("");
+}
 
 async function share(list,watched,uid,csrf,cookie){
  const before=await get(A.daily,cookie,HOME,0),beforeError=classify(before,"分享状态");
@@ -212,10 +261,10 @@ async function share(list,watched,uid,csrf,cookie){
   // press. Cron, ambiguous responses and accepted requests never retry.
   const manual=isPanel()&&typeof $trigger!=="undefined"&&$trigger==="button";
   const cooled=!attempt.submittedAt||Date.now()-attempt.submittedAt>=SHARE_RETRY_MS;
-  // One migration recovery is available only for an explicit v3 rejection
-  // that exhausted the old flow. It must establish the new video context
-  // first, and is durably consumed even if preparation fails or is killed.
-  repair=rejected&&manual&&cooled&&attempt.version===3&&count===2&&!attempt.repairUsed;
+  // One migration recovery: v3 keeps its prior recovery; v4 additionally
+  // requires official watch completion and signed video context. Reserve
+  // durably even if preparation fails or the process is killed.
+  repair=rejected&&manual&&cooled&&count===2&&!attempt.repairUsed&&(attempt.version===3||attempt.version===4&&!!wbiKey&&before.data.watch===true);
   if(!rejected||!manual||!cooled||(count>=2&&!repair))return attempt.code===-403||attempt.code===403?shareFailure(attempt,cookie,false):confirmShare(cookie,attempt,key);
   tries=count+1;
   priorAttempt=attempt;
@@ -225,12 +274,12 @@ async function share(list,watched,uid,csrf,cookie){
  if(!v)return op("分享",null,"没有可用视频");
  if(repair){
   checkRun(TO*1000);
-  const reserved={...priorAttempt,version:4,repairUsed:true,repairReservedAt:Date.now(),context:"open-video-v1",opened:false,preparationOnly:true};
+  const reserved={...priorAttempt,version:5,repairUsed:true,repairReservedAt:Date.now(),context:"signed-open-video-v2",opened:false,preparationOnly:true};
   if(!$persistentStore.write(JSON.stringify(reserved),key))return op("分享",null,"无法保存恢复记录，未执行准备或分享写入");
  }
  const prepared=await openShareVideo(v,watched,uid,csrf,cookie);
  if(prepared.err&&prepared.err.fatal)return prepared.err;
- if(repair&&!prepared.opened){
+ if(repair&&(!prepared.opened||priorAttempt.version===4&&!prepared.video.signed)){
   const failure=shareFailure(priorAttempt,cookie,false);
   return{...failure,message:"新视频打开未获确认，本轮未补试分享；今日不再补试",detail:failure.detail+"\n准备结果："+(prepared.err?prepared.err.message:"无法获取播放资料")};
  }
@@ -238,7 +287,7 @@ async function share(list,watched,uid,csrf,cookie){
  // Persist before sending: a timeout or killed script must not cause another write.
  if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
  checkRun(TO*1000);
- attempt={version:4,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:"",context:"open-video-v1",opened:prepared.opened,repairUsed:repair};
+ attempt={version:5,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:"",context:wbiKey?"signed-open-video-v2":"open-video-v1",opened:prepared.opened,repairUsed:repair};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
  // Fixed task-oriented request, aligned with current BLTH. No parameter retries.
  const target=v.aid?{aid:v.aid}:{bvid:v.bvid};
@@ -259,15 +308,15 @@ async function share(list,watched,uid,csrf,cookie){
 }
 async function openShareVideo(target,watched,uid,csrf,cookie){
  if(watched&&watched.cid)return{opened:true,video:watched,err:null};
- const v=target.cid?target:await video(target.bvid,cookie);
+ const v=target.cid&&(!wbiKey||target.duration)?target:await video(target.bvid,cookie);
  if(!v)return{opened:false,video:target,err:op("分享准备",null,"视频播放资料不可用")};
  // Match BiliBiliToolPro's OpenVideo even when today's watch task is done.
  // Playback metadata/open failure stays optional for ordinary sharing.
  const response=await hb(v,uid,csrf,cookie,0,0),err=classify(response,"分享准备");
  return{opened:code(response)===0,video:v,err:err||(code(response)===0?null:op("分享准备",code(response),reason(response,"打开视频结果未确认")))};
 }
-function shareTries(a){return [3,4].includes(a.version)?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
-function shareRejected(a){return [403,-403].includes(a.code)&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&([3,4].includes(a.version)?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.code===-403&&(a.version===2||a.version==null))}
+function shareTries(a){return [3,4,5].includes(a.version)?(Number.isInteger(a.tries)&&a.tries>=1?a.tries:2):1}
+function shareRejected(a){return [403,-403].includes(a.code)&&a.requestSucceeded===false&&a.confirmed===false&&!a.quarantined&&([3,4,5].includes(a.version)?Number.isInteger(a.httpStatus)&&a.httpStatus>=200&&a.httpStatus<300&&Number.isFinite(a.submittedAt)&&a.submittedAt>0:a.code===-403&&(a.version===2||a.version==null))}
 function shareMessage(value,cookie,csrf){
  let s=String(value||"");const secrets=[csrf,...Object.values(parseCookie(cookie))].filter(v=>typeof v==="string"&&v.length>0).sort((a,b)=>b.length-a.length);
  for(const v of secrets){const tokens=[v,encodeURIComponent(v)];try{tokens.push(decodeURIComponent(v))}catch(_){}for(const token of tokens)if(token)s=s.split(token).join("[已隐藏]");}
@@ -341,27 +390,28 @@ async function coins(list,goal,start,uid,csrf,cookie,balance=MAX){
   if(!$persistentStore.write(JSON.stringify(ledger),key))return coinResult(cur,spent,writes,hit34004,op("投币",null,"投币结果记录保存失败；已停止后续投币"));
   if(fe&&fe.fatal)return coinResult(cur,spent,writes,hit34004,fe);
   if(cd===0){last=null;if(cur<goal&&spent<balance)await sleep(rand(3000,5000));continue}
-  if(cd===-104)return coinResult(cur,spent,writes,hit34004,op("投币",cd,"硬币余额不足"));
+  if(cd===-104)return coinResult(cur,spent,writes,hit34004,null,true);
   if(cd===34004){hit34004++;last=op("投币",cd,"投币间隔太短，已换视频继续");if(hit34004>=COIN_MAX_34004)return coinResult(cur,spent,writes,hit34004,last);await sleep(rand(5000,8000));continue}
   if(cd===-403||cd===403)return coinResult(cur,spent,writes,hit34004,op("投币",cd,"账号/操作被拒绝，已停止后续投币写入"));
   if([-400,10003,34002,34003,34005].includes(cd)){last=op("投币",cd,reason(r,"当前视频不可投币"));await sleep(rand(1500,3000));continue}
   return coinResult(cur,spent,writes,hit34004,op("投币",cd,reason(r,"未知错误，已停止后续投币")));
  }
  const finalLive=coinCount(await coinExp(cookie,0));if(finalLive!==null)cur=Math.max(cur,finalLive);
- const err=cur<goal?(last||op("投币",spent>=balance?-104:null,spent>=balance?"当前可用硬币已用完":"达到候选/写入上限，未能补满目标")):null;
- return coinResult(cur,spent,writes,hit34004,err);
+ const balanceLimited=cur<goal&&spent>=balance;
+ const err=cur<goal&&!balanceLimited?(last||op("投币",null,"达到候选/写入上限，未能补满目标")):null;
+ return coinResult(cur,spent,writes,hit34004,err,balanceLimited);
 }
 function readCoinLedger(key,day){
  const raw=$persistentStore.read(key);if(!raw)return{version:1,day,count:0,pending:false};
  try{const v=JSON.parse(raw);if(!v||v.version!==1||!validShareDay(v.day)||v.day>day||!Number.isInteger(v.count)||v.count<0||v.count>MAX||typeof v.pending!=="boolean")throw new Error();return v.day===day?v:{version:1,day,count:0,pending:false};}
  catch(_){const v={version:1,day,count:MAX,pending:true};$persistentStore.write(JSON.stringify(v),key);return v;}
 }
-function coinResult(count,spent,writes,hit34004,err){return{count,spent,err,meta:{writes,hit34004}}}
+function coinResult(count,spent,writes,hit34004,err,balanceLimited=false){return{count,spent,err,meta:{writes,hit34004,balanceLimited}}}
 
 function get(u,c,r,n=0){return req("GET",u,"",c,r,n,null,null)}
 function postForm(u,b,c,r,o="https://www.bilibili.com"){return req("POST",u,b,c,r,0,o,"application/x-www-form-urlencoded; charset=UTF-8")}
 async function req(m,u,b,c,r,n,o,ct){let x=null;for(let i=0;i<=n;i++){checkRun(TO*1000);x=await raw(m,u,b,c,r,o,ct);checkRun();if(m!=="GET"||!x.retry||i===n)return x.body;await sleep(300*(i+1))}return null}
-function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=num(res&&res.status);let j=parse(data);if(!j||typeof j!=="object"||Array.isArray(j))j=null;if(j&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:null,retry:true});return}if(hs<200||hs>=300){if(!j)j={code:hs,message:"HTTP "+hs,__httpStatus:hs};ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:m==="GET"&&!j})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
+function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME,"Cache-Control":"no-cache",Pragma:"no-cache"};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=num(res&&res.status);let j=parse(data);if(!j||typeof j!=="object"||Array.isArray(j))j=null;if(j&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:null,retry:true});return}if(hs<200||hs>=300){if(!j)j={code:hs,message:"HTTP "+hs,__httpStatus:hs};ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:m==="GET"&&!j})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
 function classify(b,stage){const c=code(b),m=txt(b&&(b.message||b.msg)||"B站拒绝了请求",120);if(c===-101||c===-111)return{fatal:true,type:"cookie",stage,code:c,message:m};if(c===-102)return{fatal:true,type:"account",stage,code:c,message:m};if([-352,-412,412,429,-509,509].includes(c))return{fatal:true,type:"risk",stage,code:c,message:m};if(c===-403||c===403)return op(stage,c,m);return null}
 function checkRead(b,stage){let e=classify(b,stage);if(code(b)===0&&b.data&&b.data.isLogin===false)e={fatal:true,type:"cookie",stage,code:-101,message:"账号未登录"};if(e&&e.fatal){const error=new Error(stage);error.failure=e;throw error;}}
 function op(stage,code,message){return{fatal:false,type:"operation",stage,code,message:txt(message,120)}}

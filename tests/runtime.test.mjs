@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 function exhaustedShare(overrides = {}) {
@@ -102,7 +103,7 @@ test('share context: screenshot v3 exhausted rejection gets one prepared recover
   } });
   await rt.start();assert.equal(sharePosts(rt).length, 1);
   const record = JSON.parse(store.get(SH));
-  assert.equal(record.version, 4);assert.equal(record.tries, 3);
+  assert.equal(record.version, 5);assert.equal(record.tries, 3);
   assert.equal(record.opened, true);assert.equal(record.confirmed, true);
   assert.match(rt.completions[0].content, /今日任务已完成/);
   const repeated = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => state(false) });
@@ -119,7 +120,7 @@ test('share context: failed opening consumes migration without sharing or repeat
   const first = runtime('Betty-Bilibili-Daily', options);
   assert.match((await first.run("share(['BV1234567890'],null,'42','csrf','cookie')")).message, /本轮未补试/);
   assert.equal(heartbeats(first).length, 1);assert.equal(sharePosts(first).length, 0);
-  assert.equal(JSON.parse(store.get(SH)).version, 4);
+  assert.equal(JSON.parse(store.get(SH)).version, 5);
   const repeated = runtime('Betty-Bilibili-Daily', options);
   await repeated.run("share(['BV1234567890'],null,'42','csrf','cookie')");
   assert.equal(repeated.calls.filter(q => q.method === 'post').length, 0);
@@ -837,7 +838,7 @@ test('coins: reservations are per UID and stop on missing live EXP', async () =>
 test('coins: balance and already-donated video limits remain enforced', async () => {
   const rt = runtime('Betty-Bilibili-Daily', { respond: dailyResponse });
   const result = await rt.run("coins(['BV1234567890','BV1234567891','BV1234567892'],5,0,'42','csrf','cookie',2)");
-  assert.equal(result.spent, 2);assert.equal(result.err.code, -104);
+  assert.equal(result.spent, 2);assert.equal(result.err, null);assert.equal(result.meta.balanceLimited, true);
   for (const data of [{ multiply: 2 }, { multiply: null }, { multiply: false }]) {
     const capped = runtime('Betty-Bilibili-Daily', { respond: (q, m) => q.url.includes('/archive/coins') ? { code: 0, data } : dailyResponse(q, m) });
     await coinRun(capped);assert.equal(coinPosts(capped).length, 0);
@@ -1170,4 +1171,152 @@ test('share recovery: normal entry migrates saved -403 and surfaces a new reject
   assert.match(rt.notices[0][2], /服务端信息：访问权限不足/);
   assert.ok(!rt.notices[0][2].includes('写入次数已用尽'));
   assert.equal(store.get(CK), oldCookie);
+});
+
+for (const mode of ['budget', 'api', 'http-error']) {
+  test(`daily: coin balance stop is separate from request failure (${mode})`, async () => {
+    let accepted = 0;
+    const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+      if (m === 'post' && q.url.endsWith('/coin/add')) {
+        if (mode === 'api') return { code: -104 };
+        if (mode === 'http-error') return http(503, { code: -104 });
+        accepted++;return { code: 0 };
+      }
+      return dailyResponse(q, m, { money: mode === 'budget' ? 1 - accepted : 5, exp: accepted * 10 });
+    } });
+    await rt.start();
+    assert.equal(coinPosts(rt).length, 1);
+    const notice = rt.notices.at(-1)[2];
+    assert.match(rt.completions[0].content, /部分完成/);
+    if (mode === 'http-error') {
+      assert.match(notice, /异常：投币 code 503/);
+      assert.equal(JSON.parse(rt.store.get(COIN)).pending, true);
+    } else {
+      assert.match(notice, /余额不足/);
+      assert.doesNotMatch(notice, /异常：|code -104/);
+      assert.match(notice, new RegExp('明确成功 ' + accepted + ' 枚'));
+      assert.equal(JSON.parse(rt.store.get(COIN)).pending, false);
+    }
+  });
+}
+
+for (const task of ['share', 'watch']) {
+  for (const confirmed of [false, true]) {
+    test(`daily: final ${task} confirmation reconciles only recovered task errors (${confirmed})`, async () => {
+      let reads = 0;
+      const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+        if (q.url.endsWith('/exp/reward')) {
+          reads++;
+          const done = confirmed && reads >= (task === 'share' ? 9 : 3);
+          return dailyResponse(q, m, { exp: 50, watch: task === 'watch' ? done : true, share: task === 'share' ? done : true });
+        }
+        if (task === 'watch' && q.url.includes('/heartbeat')) return { code: -403 };
+        return dailyResponse(q, m, { exp: 50 });
+      } });
+      await rt.start();
+      const notice = rt.notices.at(-1)[2];
+      if (confirmed) {
+        assert.match(rt.completions[0].content, /今日任务已完成/);
+        assert.doesNotMatch(notice, /异常：/);
+      } else {
+        assert.match(rt.completions[0].content, /部分完成/);
+        assert.match(notice, /异常：/);
+      }
+      assert.equal(coinPosts(rt).length, 0);
+      assert.equal(sharePosts(rt).length, task === 'share' ? 1 : 0);
+    });
+  }
+}
+
+const wbiFixture = { img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png', sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png' };
+const digest = s => createHash('md5').update(s).digest('hex');
+test('WBI: digest matches independent standard implementation across block boundaries', () => {
+  const rt = runtime('Betty-Bilibili-Daily');
+  for (const s of ['', 'a', 'abc', 'message digest', ...[55,56,63,64,65,120,1000].map(n => 'x'.repeat(n))]) {
+    assert.equal(rt.run(`md5Ascii(${JSON.stringify(s)})`), digest(s));
+  }
+  rt.context.keys = wbiFixture;
+  assert.equal(rt.run('wbiMixin(keys)'), 'ea1db124af3c7062474693fa704f4ff8');
+  assert.equal(rt.run('wbiMixin({})'), '');
+});
+test('WBI: query uses sorted encoded filtered parameters and current timestamp', () => {
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => sept11 });
+  const query = rt.run(`wbiQuery({z:"中文 !'()*",a:1},'salt')`);
+  const unsigned = 'a=1&wts=' + Math.floor(sept11 / 1000) + '&z=%E4%B8%AD%E6%96%87%20';
+  assert.equal(query, unsigned + '&w_rid=' + digest(unsigned + 'salt'));
+});
+for (const duration of [2, 120]) {
+  test(`watch: signed reports preserve start and elapsed time, await official delayed state (${duration}s video)`, async () => {
+    let clock = sept11, progressAt = null;
+    const rt = runtime('Betty-Bilibili-Daily', { now: () => clock, onSleep: ms => { clock += ms; }, respond: (q, m) => {
+      if (q.url.includes('/view?')) return { code: 0, data: { ...video, duration } };
+      if (q.url.includes('/heartbeat')) {
+        const f = new URLSearchParams(q.body), u = new URL(q.url), signature = u.searchParams.get('w_rid');
+        const query = q.url.split('?')[1].split('&w_rid=')[0];
+        assert.equal(signature, digest(query + 'salt'));
+        assert.equal(f.get('start_ts'), String(Math.floor(sept11 / 1000)));
+        assert.equal(f.get('played_time'), u.searchParams.get('w_played_time'));
+        assert.equal(f.get('video_duration'), String(duration));
+        assert.equal(Number(f.get('realtime')), (clock - sept11) / 1000);
+        if (f.get('played_time') !== '0') progressAt = clock;
+        return { code: 0 };
+      }
+      return { code: 0, data: { login: true, watch: progressAt !== null && clock - progressAt >= 3000, share: false, coins: 0 } };
+    } });
+    rt.run("wbiKey='salt'");
+    const result = await rt.run("watch(['BV1234567890'],'42','csrf','cookie')");
+    assert.equal(result.err, null);assert.equal(heartbeats(rt).length, 2);
+    assert.equal(result.video.signed, true);
+  });
+}
+test('watch: accepted uncredited heartbeat remains pending without cycling through more writes', async () => {
+  const rt = runtime('Betty-Bilibili-Daily', { respond: (q,m) => dailyResponse(q,m,{watch:false}) });
+  const r = await rt.run("watch(['BV1234567890','BV1234567891'],'42','csrf','cookie')");
+  assert.equal(r.err.pending, true);assert.equal(r.err.code, 0);
+  assert.match(r.err.detail, /HTTP 200/);assert.equal(heartbeats(rt).length, 2);
+});
+for (const mode of ['ready', 'unwatched', 'no-key', 'ambiguous', 'failed-open']) {
+  test(`share: signed-context migration stays bounded (${mode})`, async () => {
+    const store = new Map([[SH, JSON.stringify(exhaustedShare({ version: 4, ...(mode === 'ambiguous' ? { code: null, httpStatus: null } : {}) }))]]);
+    const opts = { store, now: () => sept11, respond: (q,m) => {
+      if (q.url.includes('/view?')) return { code: 0, data: { ...video, duration: 120 } };
+      if (q.url.includes('/heartbeat')) return mode === 'failed-open' ? null : { code: 0 };
+      if (q.url.endsWith('/share/add')) return { code: -403 };
+      return { code: 0, data: { login: true, watch: mode !== 'unwatched', share: false, coins: 50 } };
+    } };
+    const rt = runtime('Betty-Bilibili-Daily', opts);if (mode !== 'no-key') rt.run("wbiKey='salt'");
+    await rt.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+    assert.equal(sharePosts(rt).length, mode === 'ready' ? 1 : 0);
+    const next = runtime('Betty-Bilibili-Daily', opts);if (mode !== 'no-key') next.run("wbiKey='salt'");
+    await next.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+    assert.equal(sharePosts(next).length, 0);
+  });
+}
+
+test('watch: Beijing midnight during elapsed wait prevents progress write', async () => {
+  let clock = sept11;
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => clock, onSleep: () => { clock += 86400000; }, respond: dailyResponse });
+  rt.run('runDay=shareDay();deadline=Date.now()+270000');
+  await assert.rejects(rt.run("watch(['BV1234567890'],'42','csrf','cookie')"), e => e.stopped === true);
+  assert.equal(heartbeats(rt).length, 1);
+});
+test('daily: fresh nav key signs watch and recovers only old explicit share rejection', async () => {
+  let clock = sept11, watched = false, shared = false;
+  const store = priorSession(true);store.set(SH, JSON.stringify(exhaustedShare({version:4})));
+  const rt = runtime('Betty-Bilibili-Daily', { store, now: () => clock, onSleep: ms => { clock += ms; }, respond: (q,m) => {
+    assert.equal(q.headers['Cache-Control'], 'no-cache');
+    if (q.url.endsWith('/nav')) return { code:0, data:{...navOK(0,1).data,wbi_img:wbiFixture} };
+    if (q.url.includes('/heartbeat')) {
+      assert.ok(new URL(q.url).searchParams.get('w_rid'));
+      if (Number(new URLSearchParams(q.body).get('played_time'))>0) watched=true;
+      return {code:0};
+    }
+    if (q.url.endsWith('/share/add')) {assert.ok(watched);shared=true;return {code:0};}
+    return dailyResponse(q,m,{money:0,watch:watched,share:shared});
+  } });
+  await rt.start();
+  assert.equal(sharePosts(rt).length,1);assert.equal(coinPosts(rt).length,0);
+  assert.equal(JSON.parse(store.get(SH)).confirmed,true);
+  assert.match(rt.notices.at(-1)[2],/分享 ✅ 本次完成/);
+  assert.match(rt.notices.at(-1)[2],/余额不足/);
 });
