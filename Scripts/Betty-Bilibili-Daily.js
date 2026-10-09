@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.12.3";
+const N="贝蒂的哔哩哔哩每日签到",V="1.12.1";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -107,7 +107,7 @@ async function run(){
  const nav2=await get(A.nav,cookie,HOME,1);checkRead(nav2,"最终账号查询");const nav2ok=logged(nav2)&&String(nav2.data.mid)===uid;
  const bal=nav2ok?int(nav2.data.money):null;
  const levelExp1=nav2ok?currentLevelExp(nav2.data):null;
- const limited=fc!==null&&fc<MAX&&(bal===0||coinMeta&&coinMeta.balanceLimited),coinOK=fc!==null&&fc>=MAX;
+ const limited=fc!==null&&fc<MAX&&(bal===0||coinErr&&coinErr.code===-104),coinOK=fc!==null&&fc>=MAX;
  const coreOK=!!(finalStatus&&st.login&&st.watch&&coinOK&&vip.done!==false),shareOK=!!st.share,ct=fc===null?"未知/5":fc+"/5";
  const daily0=taskExp(st0,fx0,c0),daily1=taskExp(finalStatus?st:null,fx,fc),vipShort=vipPanel(vip);
  if(coreOK&&shareOK){
@@ -127,10 +127,7 @@ async function run(){
   "硬币余额 "+(bal===null?"未知":bal)
  ];
  if(!finalStatus)lines.push("最终每日任务查询失败；上列登录/观看/分享为本轮较早状态，不代表最终确认。");
- // Only a fresh official task confirmation resolves watch/share errors.
- // Coin write failures and VIP claim errors retain their own evidence.
- const unresolved=errs.filter(e=>!(finalStatus&&((e===watchErr&&finalStatus.watch)||(e===shareErr&&finalStatus.share))));
- if(unresolved.length)lines.push("异常："+unresolved.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
+ if(errs.length)lines.push("异常："+errs.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
  notify(coreOK&&shareOK?"✅ 今日可执行任务已完成":"⚠️ 今日任务部分完成",lines.join("\n"));
 }
 
@@ -344,23 +341,22 @@ async function coins(list,goal,start,uid,csrf,cookie,balance=MAX){
   if(!$persistentStore.write(JSON.stringify(ledger),key))return coinResult(cur,spent,writes,hit34004,op("投币",null,"投币结果记录保存失败；已停止后续投币"));
   if(fe&&fe.fatal)return coinResult(cur,spent,writes,hit34004,fe);
   if(cd===0){last=null;if(cur<goal&&spent<balance)await sleep(rand(3000,5000));continue}
-  if(cd===-104)return coinResult(cur,spent,writes,hit34004,null,true);
+  if(cd===-104)return coinResult(cur,spent,writes,hit34004,op("投币",cd,"硬币余额不足"));
   if(cd===34004){hit34004++;last=op("投币",cd,"投币间隔太短，已换视频继续");if(hit34004>=COIN_MAX_34004)return coinResult(cur,spent,writes,hit34004,last);await sleep(rand(5000,8000));continue}
   if(cd===-403||cd===403)return coinResult(cur,spent,writes,hit34004,op("投币",cd,"账号/操作被拒绝，已停止后续投币写入"));
   if([-400,10003,34002,34003,34005].includes(cd)){last=op("投币",cd,reason(r,"当前视频不可投币"));await sleep(rand(1500,3000));continue}
   return coinResult(cur,spent,writes,hit34004,op("投币",cd,reason(r,"未知错误，已停止后续投币")));
  }
  const finalLive=coinCount(await coinExp(cookie,0));if(finalLive!==null)cur=Math.max(cur,finalLive);
- const balanceLimited=cur<goal&&spent>=balance;
- const err=cur<goal&&!balanceLimited?(last||op("投币",null,"达到候选/写入上限，未能补满目标")):null;
- return coinResult(cur,spent,writes,hit34004,err,balanceLimited);
+ const err=cur<goal?(last||op("投币",spent>=balance?-104:null,spent>=balance?"当前可用硬币已用完":"达到候选/写入上限，未能补满目标")):null;
+ return coinResult(cur,spent,writes,hit34004,err);
 }
 function readCoinLedger(key,day){
  const raw=$persistentStore.read(key);if(!raw)return{version:1,day,count:0,pending:false};
  try{const v=JSON.parse(raw);if(!v||v.version!==1||!validShareDay(v.day)||v.day>day||!Number.isInteger(v.count)||v.count<0||v.count>MAX||typeof v.pending!=="boolean")throw new Error();return v.day===day?v:{version:1,day,count:0,pending:false};}
  catch(_){const v={version:1,day,count:MAX,pending:true};$persistentStore.write(JSON.stringify(v),key);return v;}
 }
-function coinResult(count,spent,writes,hit34004,err,balanceLimited=false){return{count,spent,err,meta:{writes,hit34004,balanceLimited}}}
+function coinResult(count,spent,writes,hit34004,err){return{count,spent,err,meta:{writes,hit34004}}}
 
 function get(u,c,r,n=0){return req("GET",u,"",c,r,n,null,null)}
 function postForm(u,b,c,r,o="https://www.bilibili.com"){return req("POST",u,b,c,r,0,o,"application/x-www-form-urlencoded; charset=UTF-8")}
