@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.12.2";
+const N="贝蒂的哔哩哔哩每日签到",V="1.12.3";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -127,7 +127,10 @@ async function run(){
   "硬币余额 "+(bal===null?"未知":bal)
  ];
  if(!finalStatus)lines.push("最终每日任务查询失败；上列登录/观看/分享为本轮较早状态，不代表最终确认。");
- if(errs.length)lines.push("异常："+errs.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
+ // Only a fresh official task confirmation resolves watch/share errors.
+ // Coin write failures and VIP claim errors retain their own evidence.
+ const unresolved=errs.filter(e=>!(finalStatus&&((e===watchErr&&finalStatus.watch)||(e===shareErr&&finalStatus.share))));
+ if(unresolved.length)lines.push("异常："+unresolved.map(e=>e.stage+" code "+(e.code==null?"未知":e.code)).join("；"));
  notify(coreOK&&shareOK?"✅ 今日可执行任务已完成":"⚠️ 今日任务部分完成",lines.join("\n"));
 }
 
