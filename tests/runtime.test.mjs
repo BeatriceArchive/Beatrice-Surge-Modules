@@ -11,6 +11,63 @@ function exhaustedShare(overrides = {}) {
 const sharePosts = rt => rt.calls.filter(q => q.method === 'post' && q.url.endsWith('/share/add'));
 const heartbeats = rt => rt.calls.filter(q => q.method === 'post' && q.url.includes('/heartbeat'));
 
+test('daily: official completion at the main entry survives stale state on the next run', async () => {
+  for (const existing of [false, true]) {
+    const store = priorSession(true);
+    if (existing) store.set(SH, JSON.stringify(exhaustedShare({ version: 4, tries: 1 })));
+    const first = runtime('Betty-Bilibili-Daily', { store, now: () => sept11,
+      respond: (q, m) => dailyResponse(q, m, { exp: 50, money: 0, share: true }) });
+    await first.start();
+    const next = runtime('Betty-Bilibili-Daily', { store, now: () => sept11 + 60001,
+      respond: (q, m) => dailyResponse(q, m, { exp: 50, money: 0, share: false }) });
+    await next.start();
+    assert.equal(sharePosts(next).length, 0, 'confirmed task must not be submitted again');
+    assert.equal(JSON.parse(store.get(SH)).confirmed, true);
+    assert.match(next.completions[0].content, /今日任务已完成/);
+  }
+});
+
+test('coins: unusable feed candidates fall back to ranking and fill the remaining target', async () => {
+  let spent = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), now: () => sept11, respond: (q, m) => {
+    if (q.url.includes('/feed/all')) return { code: 0, data: { items: Array.from({ length: 5 }, (_, i) => ({ modules: { module_dynamic: { major: { archive: { bvid: 'BV999999999' + i } } } } })) } };
+    if (q.url.includes('/view?') && q.url.includes('BV999999999')) return { code: -404 };
+    if (q.url.endsWith('/coin/add')) { spent++;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: spent * 10 });
+  } });
+  await rt.start();
+  assert.equal(coinPosts(rt).length, 5);
+  assert.equal(rt.calls.filter(q => q.url.includes('/ranking/')).length, 1);
+  assert.match(rt.completions[0].content, /今日任务已完成/);
+});
+
+test('share: completion-only receipts expire next day and failed persistence never invents a POST', async () => {
+  const store = new Map();
+  const first = runtime('Betty-Bilibili-Daily', { store, now: () => sept11, respond: () => state(true) });
+  assert.equal(await shareRun(first), null);
+  assert.equal(JSON.parse(store.get(SH)).tries, 0);
+  const next = runtime('Betty-Bilibili-Daily', { store, now: () => sept11 + 86400000,
+    respond: (_, m) => m === 'post' ? { code: -403 } : state(false) });
+  await shareRun(next);assert.equal(sharePosts(next).length, 1);
+  const failed = runtime('Betty-Bilibili-Daily', { failStore: key => key === SH, respond: () => state(true) });
+  assert.equal(await shareRun(failed), null);
+  assert.equal(failed.store.has(SH), false);assert.equal(sharePosts(failed).length, 0);
+});
+
+test('coins: candidate fallback stays bounded and risk response stops writes', async () => {
+  for (const risk of [false, true]) {
+    const rt = runtime('Betty-Bilibili-Daily', { respond: (q, m) => {
+      if (q.url.includes('/view?')) return { code: -404 };
+      if (q.url.includes('/ranking/')) return risk ? { code: -412 } : { code: 0, data: { list: [] } };
+      return dailyResponse(q, m);
+    } });
+    if (risk) await assert.rejects(coinRun(rt), e => e.failure?.type === 'risk');
+    else assert.ok((await coinRun(rt)).err);
+    assert.equal(rt.calls.filter(q => q.url.includes('/ranking/')).length, 1);
+    assert.equal(coinPosts(rt).length, 0);
+  }
+});
+
 test('share context: completed watch still opens the selected archive before sharing', async () => {
   let opened = false, shared = false;
   const store = priorSession(true), original = store.get(SESSION);

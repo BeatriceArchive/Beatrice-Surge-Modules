@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.12.0";
+const N="贝蒂的哔哩哔哩每日签到",V="1.12.1";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -145,7 +145,17 @@ async function vipExperience(csrf,cookie,user,watchDone,beforeExp){
 }
 function isVip(u){const a=num(u&&u.vipStatus);if(a!==null)return a===1;return num(u&&u.vip&&u.vip.status)===1}
 async function getLevelExp(cookie){const b=await get(A.nav,cookie,HOME,1);checkRead(b,"等级经验查询");return logged(b)?currentLevelExp(b.data):null}
-async function status(cookie,r=1){const b=await get(A.daily,cookie,HOME,r);checkRead(b,"每日任务查询");if(!b||code(b)!==0||!b.data)return null;const d=b.data;if(typeof d.login!=="boolean"||typeof d.watch!=="boolean"||typeof d.share!=="boolean")return null;return{login:d.login,watch:d.watch,share:d.share,coins:num(d.coins)}}
+async function status(cookie,r=1){const b=await get(A.daily,cookie,HOME,r);checkRead(b,"每日任务查询");if(!b||code(b)!==0||!b.data)return null;const d=b.data;if(typeof d.login!=="boolean"||typeof d.watch!=="boolean"||typeof d.share!=="boolean")return null;if(d.share)rememberShare(parseCookie(cookie).DedeUserID);return{login:d.login,watch:d.watch,share:d.share,coins:num(d.coins)}}
+function rememberShare(uid){
+ if(!/^\d+$/.test(String(uid||"")))return;
+ const key=SHARE_KEY+uid,day=shareDay();let saved=null;
+ try{saved=JSON.parse($persistentStore.read(key)||"null")}catch(_){}
+ if(saved&&saved.day===day&&saved.confirmed===true)return;
+ // Official completion may come from another client, without a local POST.
+ // Preserve same-day attempt diagnostics; never carry yesterday's evidence.
+ const record=saved&&saved.day===day?{...saved,confirmed:true}:{version:4,day,tries:0,requestSucceeded:false,code:null,confirmed:true};
+ $persistentStore.write(JSON.stringify(record),key);
+}
 async function coinExp(cookie,r=1){const b=await get(A.coinExp,cookie,HOME,r);checkRead(b,"投币经验查询");return b&&code(b)===0?num(b.data):null}
 
 async function videos(cookie){
@@ -180,8 +190,7 @@ async function share(list,watched,uid,csrf,cookie){
  if(beforeError)return beforeError;
  if(!before||code(before)!==0||!before.data||typeof before.data.share!=="boolean")return op("分享",null,"无法查询任务状态，未执行写入");
  if(before.data.share){
-  const key=SHARE_KEY+uid;
-  try{const saved=JSON.parse($persistentStore.read(key)||"null");if(saved&&saved.day===shareDay()){saved.confirmed=true;$persistentStore.write(JSON.stringify(saved),key)}}catch(_){}
+  rememberShare(uid);
   return null;
  }
  const day=shareDay(),key=SHARE_KEY+uid;
@@ -301,7 +310,10 @@ async function coins(list,goal,start,uid,csrf,cookie,balance=MAX){
  const day=shareDay(),key=COIN_KEY+uid;
  let ledger=readCoinLedger(key,day),cur=Math.max(start,ledger.count),spent=0,writes=0,hit34004=0,last=null;
  if(ledger.pending)return coinResult(cur,spent,writes,hit34004,op("投币",null,"上次结果未确认或记录损坏；今日暂停投币，次日恢复"));
- for(let i=0;i<Math.min(list.length,24)&&cur<goal&&spent<balance&&writes<COIN_MAX_WRITES;i++){
+ for(let i=0;i<24&&cur<goal&&spent<balance&&writes<COIN_MAX_WRITES;i++){
+  // Feed length does not imply eligibility: deleted, own or already-full
+  // archives can exhaust it. Expand at most once, within the same budget.
+  if(i>=list.length){await moreVideos(list,cookie);if(i>=list.length)break}
   if(shareDay()!==day)return coinResult(cur,spent,writes,hit34004,op("投币",null,"执行期间已跨日，已停止投币"));
   const live=coinCount(await coinExp(cookie,0));
   if(live===null)return coinResult(cur,spent,writes,hit34004,op("投币",null,"无法确认当前投币经验，未继续写入"));
