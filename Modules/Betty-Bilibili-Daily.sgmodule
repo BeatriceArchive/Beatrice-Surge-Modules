@@ -1,8 +1,8 @@
 #!name=贝蒂的哔哩哔哩每日签到
-#!desc=每天 08:00 自动执行，也可通过 Panel 手动运行。分享前补开本次视频并核对官方经验；旧版明确拒绝记录可有界恢复一次；投币最多补至 5 枚，跨次运行保留额度，结果不确定时当天停止投币。大会员额外领取每日等级经验。
+#!desc=每天 08:00 自动执行，也可通过 Panel 手动运行。观看使用 WBI 签名、连续心跳与官方状态确认；分享前打开视频，旧版明确拒绝记录满足新上下文时可有界恢复一次；投币最多补至 5 枚，跨次运行保留额度，结果不确定时当天停止投币。大会员额外领取每日等级经验。
 #!author=BeatriceArchive
 #!category=Beatrice
-# Version: 1.12.1
+# Version: 1.13.0
 # Project: Betty-Bilibili-Daily
 # Cookie 获取请使用独立模块 Betty-Bilibili-Cookie.sgmodule。
 # Copyright (c) 2026 BeatriceArchive
