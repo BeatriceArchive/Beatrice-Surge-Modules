@@ -2,7 +2,7 @@
  * Beatrice Surge Modules
  * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
  */
-const N="贝蒂的哔哩哔哩每日签到",V="1.13.0";
+const N="贝蒂的哔哩哔哩每日签到",V="1.14.0";
 const CK="betty.bilibili.cookie",MK="betty.bilibili.cookie.meta",BK="betty.bilibili.cookie.invalid_notice";
 const LK="betty.bilibili.daily.run_lock",SK="betty.bilibili.daily.panel_state",SC="official-qr-home-v3";
 const SESSION="betty.bilibili.cookie.session";
@@ -27,7 +27,7 @@ const A={
 };
 let done=false,owner="",held=false,runDay="",runCookie="",deadline=0;
 const videoHints=Object.create(null);
-let rankFetched=false,wbiKey="";
+let rankFetched=false,wbiKey="",runUA=UA,deviceContext="",observedTasks=null;
 let panel=readState()||P("每天 08:00 自动执行｜点击刷新立即运行","calendar.badge.checkmark","#8E8E93");
 main().finally(()=>{try{if(held)saveState(panel);unlock()}finally{finish(panel)}});
 
@@ -55,6 +55,8 @@ async function run(){
  if(miss.length){bad("缺少 "+miss.join("、"));return}
  if(/[\x00-\x1f\x7f]/.test(cookie)||!/^\d+$/.test(cm.DedeUserID)||String(meta.uid||"")!==cm.DedeUserID){bad("Cookie 与账号验证标记不一致");return}
  runCookie=cookie;
+ runUA=sessionUA(meta);
+ if(meta.deviceSource==="browser"&&runUA===meta.userAgent&&cm.buvid3&&cm.buvid4&&cm.b_nut)deviceContext=md5Ascii(encodeURIComponent([cm.buvid3,cm.buvid4,runUA].join("|")));
  const nav=await get(A.nav,cookie,HOME,1);
  const navError=classify(nav,"登录验证");if(navError&&navError.fatal){fatal(navError);return}
  if(!logged(nav)){
@@ -81,9 +83,8 @@ async function run(){
  }
  const stAfterWatch=(await status(cookie,0))||st0;
  const vipBefore=isVip(user)&&stAfterWatch.watch?await getLevelExp(cookie):null;
- const vip=await vipExperience(csrf,cookie,user,stAfterWatch.watch,vipBefore);
+ let vip=await vipExperience(csrf,cookie,user,stAfterWatch.watch,vipBefore);
  if(vip.err&&vip.err.fatal){fatal(vip.err);return}
- if(vip.err)errs.push(vip.err);
 
  let shareConfirmed=st0.share||stAfterWatch.share;
  if(!shareConfirmed){
@@ -93,19 +94,37 @@ async function run(){
   shareErr=e||null;if(e)errs.push(e);
  }
 
- let spent=0;
+ let spent=0,balance=bal0;
  const live=confirmedCoins(await coinExp(cookie,0),stAfterWatch);
- if(live!==null&&live<MAX&&bal0!==null&&bal0>0){
-   if(list.length<Math.min(MAX-live,bal0))await moreVideos(list,cookie);
-   const r=await coins(list,MAX,Math.max(c0||0,live),uid,csrf,cookie,bal0);
+ // A login coin can arrive while watch/share runs. Recheck a zero/unknown
+ // balance once before giving up; never infer a credit from login alone.
+ if(live!==null&&live<MAX&&(balance===0||balance===null)){
+  const fresh=await get(A.nav,cookie,HOME,0);checkRead(fresh,"投币余额复核");
+  balance=logged(fresh)&&String(fresh.data.mid)===uid?int(fresh.data.money):null;
+ }
+ if(live!==null&&live<MAX&&balance!==null&&balance>0){
+   if(!list.length)list.push(...await videos(cookie));
+   if(list.length<Math.min(MAX-live,balance))await moreVideos(list,cookie);
+   const r=await coins(list,MAX,Math.max(c0||0,live),uid,csrf,cookie,balance);
    spent=r.spent;coinMeta=r.meta||null;
    if(r.err&&r.err.fatal){fatal(r.err);return}
    coinErr=r.err||null;if(r.err)errs.push(r.err);
  }
 
  await sleep(1200);
- const finalStatus=await status(cookie,0),lastStatus=finalStatus||stAfterWatch,st={...lastStatus,share:shareConfirmed||lastStatus.share},fx=await coinExp(cookie,0),fc=confirmedCoins(fx,finalStatus);
- const nav2=await get(A.nav,cookie,HOME,1);checkRead(nav2,"最终账号查询");const nav2ok=logged(nav2)&&String(nav2.data.mid)===uid;
+ let finalStatus=await status(cookie,0);
+ let nav2=await get(A.nav,cookie,HOME,1);checkRead(nav2,"最终账号查询");
+ let nav2ok=logged(nav2)&&String(nav2.data.mid)===uid;
+ // nav itself can trigger the login reward. Its status must be read after it.
+ if(finalStatus&&!finalStatus.login&&nav2ok){await sleep(1200);finalStatus=await status(cookie,0);}
+ // Only retry the previously unmet prerequisite, never an attempted claim.
+ if(vip.done===false&&!stAfterWatch.watch&&finalStatus&&finalStatus.watch){
+  vip=await vipExperience(csrf,cookie,user,true,nav2ok?currentLevelExp(nav2.data):null);
+  if(vip.err&&vip.err.fatal){fatal(vip.err);return}
+  nav2=await get(A.nav,cookie,HOME,0);checkRead(nav2,"领取后账号查询");nav2ok=logged(nav2)&&String(nav2.data.mid)===uid;
+ }
+ if(vip.err)errs.push(vip.err);
+ const lastStatus=finalStatus||stAfterWatch,st={...lastStatus,share:shareConfirmed||lastStatus.share},fx=await coinExp(cookie,0),fc=confirmedCoins(fx,finalStatus);
  const bal=nav2ok?int(nav2.data.money):null;
  const levelExp1=nav2ok?currentLevelExp(nav2.data):null;
  const limited=fc!==null&&fc<MAX&&(bal===0||coinMeta&&coinMeta.balanceLimited),coinOK=fc!==null&&fc>=MAX;
@@ -149,7 +168,13 @@ async function vipExperience(csrf,cookie,user,watchDone,beforeExp){
 }
 function isVip(u){const a=num(u&&u.vipStatus);if(a!==null)return a===1;return num(u&&u.vip&&u.vip.status)===1}
 async function getLevelExp(cookie){const b=await get(A.nav,cookie,HOME,1);checkRead(b,"等级经验查询");return logged(b)?currentLevelExp(b.data):null}
-async function status(cookie,r=1){const b=await get(A.daily,cookie,HOME,r);checkRead(b,"每日任务查询");if(!b||code(b)!==0||!b.data)return null;const d=b.data;if(typeof d.login!=="boolean"||typeof d.watch!=="boolean"||typeof d.share!=="boolean")return null;if(d.share)rememberShare(parseCookie(cookie).DedeUserID);return{login:d.login,watch:d.watch,share:d.share,coins:num(d.coins)}}
+async function status(cookie,r=1){const b=await get(A.daily,cookie,HOME,r);checkRead(b,"每日任务查询");if(!b||code(b)!==0||!b.data)return null;const d=b.data;if(typeof d.login!=="boolean"||typeof d.watch!=="boolean"||typeof d.share!=="boolean")return null;if(d.share)rememberShare(parseCookie(cookie).DedeUserID);return observeTasks(d,cookie)}
+function observeTasks(d,cookie){
+ const day=shareDay(),uid=parseCookie(cookie).DedeUserID||"";
+ const previous=observedTasks&&observedTasks.day===day&&observedTasks.uid===uid?observedTasks:null;
+ const result={login:d.login||!!(previous&&previous.login),watch:d.watch||!!(previous&&previous.watch),share:d.share||!!(previous&&previous.share),coins:num(d.coins)};
+ observedTasks={...result,day,uid};return result;
+}
 function rememberShare(uid){
  if(!/^\d+$/.test(String(uid||"")))return;
  const key=SHARE_KEY+uid,day=shareDay();let saved=null;
@@ -184,14 +209,14 @@ async function watch(list,uid,csrf,cookie){
   if(code(b)!==0){last=watchFailure(b,cookie,"打开视频失败");continue}
   const t=Math.max(1,Math.min(30,v.duration||30));
   await sleep(t*1000);
-  b=await hb(v,uid,csrf,cookie,t,t);e=classify(b,"观看");if(e)return{err:e,video:null};
-  if(code(b)!==0&&code(b)!==null)return{err:watchFailure(b,cookie,"观看心跳失败"),video:null};
+  b=await hb(v,uid,csrf,cookie,t,t);e=classify(b,"观看");if(e)return{err:e,video:v};
+  if(code(b)!==0&&code(b)!==null)return{err:watchFailure(b,cookie,"观看心跳失败"),video:v};
   // Accepted or ambiguous progress must be reconciled before any new video.
   for(const delay of [1200,2500,5000]){
    await sleep(delay);const state=await status(cookie,0);
    if(state&&state.watch)return{err:null,video:v};
   }
-  return{err:{...watchFailure(b,cookie,"观看心跳已提交，官方任务仍未确认"),pending:true},video:null};
+  return{err:{...watchFailure(b,cookie,"观看心跳已提交，官方任务仍未确认"),pending:true},video:v};
  }
  return{err:last,video:null};
 }
@@ -253,7 +278,7 @@ async function share(list,watched,uid,csrf,cookie){
    return op("分享",null,"尝试记录已修复；今日暂停分享写入，明日起恢复");
   }
  }
- let tries=1,repair=false,priorAttempt=null;
+ let tries=1,repair=false,deviceRepair=false,priorAttempt=null;
  if(attempt&&attempt.day===day){
   if(attempt.confirmed===true)return null;
   const rejected=shareRejected(attempt),count=shareTries(attempt);
@@ -264,7 +289,8 @@ async function share(list,watched,uid,csrf,cookie){
   // One migration recovery: v3 keeps its prior recovery; v4 additionally
   // requires official watch completion and signed video context. Reserve
   // durably even if preparation fails or the process is killed.
-  repair=rejected&&manual&&cooled&&count===2&&!attempt.repairUsed&&(attempt.version===3||attempt.version===4&&!!wbiKey&&before.data.watch===true);
+  deviceRepair=!!deviceContext&&attempt.deviceContext!==deviceContext;
+  repair=rejected&&manual&&cooled&&count===2&&!attempt.repairUsed&&(deviceRepair||attempt.version===3||attempt.version===4&&!!wbiKey&&before.data.watch===true);
   if(!rejected||!manual||!cooled||(count>=2&&!repair))return attempt.code===-403||attempt.code===403?shareFailure(attempt,cookie,false):confirmShare(cookie,attempt,key);
   tries=count+1;
   priorAttempt=attempt;
@@ -279,7 +305,7 @@ async function share(list,watched,uid,csrf,cookie){
  }
  const prepared=await openShareVideo(v,watched,uid,csrf,cookie);
  if(prepared.err&&prepared.err.fatal)return prepared.err;
- if(repair&&(!prepared.opened||priorAttempt.version===4&&!prepared.video.signed)){
+ if(repair&&(!prepared.opened||!deviceRepair&&priorAttempt.version===4&&!prepared.video.signed)){
   const failure=shareFailure(priorAttempt,cookie,false);
   return{...failure,message:"新视频打开未获确认，本轮未补试分享；今日不再补试",detail:failure.detail+"\n准备结果："+(prepared.err?prepared.err.message:"无法获取播放资料")};
  }
@@ -287,7 +313,7 @@ async function share(list,watched,uid,csrf,cookie){
  // Persist before sending: a timeout or killed script must not cause another write.
  if(shareDay()!==day)return op("分享",null,"准备期间已跨日，留待下次正常执行");
  checkRun(TO*1000);
- attempt={version:5,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:"",context:wbiKey?"signed-open-video-v2":"open-video-v1",opened:prepared.opened,repairUsed:repair};
+ attempt={version:5,day,tries,submittedAt:Date.now(),requestSucceeded:false,code:null,confirmed:false,httpStatus:null,message:"",context:wbiKey?"signed-open-video-v2":"open-video-v1",opened:prepared.opened,repairUsed:repair,deviceContext};
  if(!$persistentStore.write(JSON.stringify(attempt),key))return op("分享",null,"无法保存尝试记录，未执行写入");
  // Fixed task-oriented request, aligned with current BLTH. No parameter retries.
  const target=v.aid?{aid:v.aid}:{bvid:v.bvid};
@@ -328,7 +354,8 @@ function shareFailure(a,cookie,fresh){
  const recovery=retry?(remaining?remaining+" 秒后可手动刷新重试一次":migration?"可手动刷新，补开视频后恢复一次":"可手动刷新重试一次"):"今日不再提交分享";
  const when=Number.isFinite(a.submittedAt)&&a.submittedAt>0?new Date(a.submittedAt+8*3600000).toISOString().slice(11,19):"旧版未记录";
  const message=shareMessage(a.message,cookie,parseCookie(cookie).bili_jct)||"旧版未保留或响应无 message";
- return{...op("分享",a.code,"服务端拒绝分享；"+recovery),detail:(fresh?"本轮已提交":"历史失败，本轮未提交")+"｜请求时间 "+when+"（北京时间）｜HTTP "+(a.httpStatus==null?"未知":a.httpStatus)+"\n服务端信息："+message+(a.context?"\n分享前打开视频："+(a.preparationOnly?"未确认，恢复已停止":a.opened?"已确认":"未确认，已降级直发"):"")};
+ const deviceHint=!deviceContext&&[-403,403].includes(a.code)?"\n可用 Cookie 工具导入本人浏览器设备信息；扫码认证有效不代表设备已登记。":"";
+ return{...op("分享",a.code,"服务端拒绝分享；"+recovery),detail:(fresh?"本轮已提交":"历史失败，本轮未提交")+"｜请求时间 "+when+"（北京时间）｜HTTP "+(a.httpStatus==null?"未知":a.httpStatus)+"\n服务端信息："+message+(a.context?"\n分享前打开视频："+(a.preparationOnly?"未确认，恢复已停止":a.opened?"已确认":"未确认，已降级直发"):"")+deviceHint};
 }
 // Sharing needs an archive identifier, not the playback CID/duration. Prefer
 // identifiers already returned by the official feed; a view failure must not
@@ -411,7 +438,7 @@ function coinResult(count,spent,writes,hit34004,err,balanceLimited=false){return
 function get(u,c,r,n=0){return req("GET",u,"",c,r,n,null,null)}
 function postForm(u,b,c,r,o="https://www.bilibili.com"){return req("POST",u,b,c,r,0,o,"application/x-www-form-urlencoded; charset=UTF-8")}
 async function req(m,u,b,c,r,n,o,ct){let x=null;for(let i=0;i<=n;i++){checkRun(TO*1000);x=await raw(m,u,b,c,r,o,ct);checkRun();if(m!=="GET"||!x.retry||i===n)return x.body;await sleep(300*(i+1))}return null}
-function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME,"Cache-Control":"no-cache",Pragma:"no-cache"};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=num(res&&res.status);let j=parse(data);if(!j||typeof j!=="object"||Array.isArray(j))j=null;if(j&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:null,retry:true});return}if(hs<200||hs>=300){if(!j)j={code:hs,message:"HTTP "+hs,__httpStatus:hs};ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:m==="GET"&&!j})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
+function raw(m,u,b,c,r,o,ct){return new Promise(ok=>{const h={"User-Agent":runUA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Cookie:c,Referer:r||HOME,"Cache-Control":"no-cache",Pragma:"no-cache"};if(m==="POST"){h["Content-Type"]=ct||"application/x-www-form-urlencoded; charset=UTF-8";if(o)h.Origin=o}const q={url:u,headers:h,timeout:TO,"auto-cookie":false,"auto-redirect":false};if(b)q.body=b;const cb=(e,res,data)=>{if(e){ok({body:null,retry:true});return}const hs=num(res&&res.status);let j=parse(data);if(!j||typeof j!=="object"||Array.isArray(j))j=null;if(j&&hs!==null)j.__httpStatus=hs;if(hs===null){ok({body:null,retry:true});return}if(hs<200||hs>=300){if(!j)j={code:hs,message:"HTTP "+hs,__httpStatus:hs};ok({body:j,retry:m==="GET"&&hs>=500});return}ok({body:j,retry:m==="GET"&&!j})};m==="POST"?$httpClient.post(q,cb):$httpClient.get(q,cb)})}
 function classify(b,stage){const c=code(b),m=txt(b&&(b.message||b.msg)||"B站拒绝了请求",120);if(c===-101||c===-111)return{fatal:true,type:"cookie",stage,code:c,message:m};if(c===-102)return{fatal:true,type:"account",stage,code:c,message:m};if([-352,-412,412,429,-509,509].includes(c))return{fatal:true,type:"risk",stage,code:c,message:m};if(c===-403||c===403)return op(stage,c,m);return null}
 function checkRead(b,stage){let e=classify(b,stage);if(code(b)===0&&b.data&&b.data.isLogin===false)e={fatal:true,type:"cookie",stage,code:-101,message:"账号未登录"};if(e&&e.fatal){const error=new Error(stage);error.failure=e;throw error;}}
 function op(stage,code,message){return{fatal:false,type:"operation",stage,code,message:txt(message,120)}}
@@ -432,6 +459,7 @@ function readSession(){
  if(raw){try{const value=JSON.parse(raw);if(value&&value.version===1&&typeof value.cookie==="string"&&value.meta)return value;}catch(_){}return{cookie:"",meta:null}}
  return{cookie:$persistentStore.read(CK)||"",meta:readMeta()};
 }
+function sessionUA(meta){const value=meta&&meta.deviceSource==="browser"&&meta.userAgent;return typeof value==="string"&&value.length>=20&&value.length<=512&&!/[^\x20-\x7e]/.test(value)?value:UA}
 function readMeta(){const x=$persistentStore.read(MK);if(!x)return null;try{const v=JSON.parse(x);return v&&typeof v==="object"?v:null}catch(_){return null}}
 function parseCookie(x){const o={};String(x||"").split(";").forEach(z=>{const i=z.indexOf("=");if(i>0)o[z.slice(0,i).trim()]=z.slice(i+1)});return o}
 function form(o){return Object.keys(o).filter(k=>o[k]!=null).map(k=>encodeURIComponent(k)+"="+encodeURIComponent(String(o[k]))).join("&")}
@@ -451,7 +479,7 @@ function checkRun(reserve=0){
  let message="";
  if(Date.now()+reserve>=deadline)message="已到本轮运行时间上限，稍后可重试";
  else if(shareDay()!==runDay)message="已跨北京时间日期，请重新运行查询新一天的状态";
- else if(runCookie&&readSession().cookie!==runCookie)message="Cookie 会话已更换，请重新运行";
+ else if(runCookie&&(readSession().cookie!==runCookie||sessionUA(readSession().meta)!==runUA))message="Cookie 会话已更换，请重新运行";
  else if(held){const l=readLock();if(!l||l.owner!==owner||l.expiresAt<=Date.now())message="运行锁已失效";}
  if(message){const e=new Error(message);e.stopped=true;throw e;}
 }
@@ -462,7 +490,7 @@ function readLock(){const x=$persistentStore.read(LK);if(!x)return null;try{cons
 function unlock(){if(!held)return;const x=readLock();if(x&&x.owner===owner)$persistentStore.write("",LK);held=false;owner=""}
 function currentUid(){const s=readSession();return String(s.meta&&s.meta.uid||"")}
 function readState(){const x=$persistentStore.read(SK);if(!x)return null;try{const v=JSON.parse(x),p=v&&v.panel;return v&&v.day===shareDay()&&v.version===V&&v.uid===currentUid()&&p&&typeof p.title==="string"&&typeof p.content==="string"?p:null}catch(_){return null}}
-function saveState(v){try{const l=readLock();if(!held||!l||l.owner!==owner||l.expiresAt<=Date.now())return;$persistentStore.write(JSON.stringify({day:shareDay(),version:V,uid:currentUid(),panel:v}),SK)}catch(_){}}
+function saveState(v){try{if(runDay&&runDay!==shareDay()||runCookie&&(readSession().cookie!==runCookie||sessionUA(readSession().meta)!==runUA))return;const l=readLock();if(!held||!l||l.owner!==owner||l.expiresAt<=Date.now())return;$persistentStore.write(JSON.stringify({day:shareDay(),version:V,uid:currentUid(),panel:v}),SK)}catch(_){}}
 function isPanel(){return typeof $input==="object"&&$input&&$input.purpose==="panel"}
 function isAuto(){return isPanel()&&(typeof $trigger==="undefined"||$trigger!=="button")}
 function P(content,icon,color){return{title:N,content:shareDay()+" · v"+V+"\n"+content,icon,"icon-color":color}}

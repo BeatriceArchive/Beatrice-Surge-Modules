@@ -1,5 +1,5 @@
 const NAME="贝蒂的哔哩哔哩 Cookie 获取";
-const VER="1.5.1";
+const VER="1.6.0";
 const CK="betty.bilibili.cookie";
 const SESSION="betty.bilibili.cookie.session";
 const META="betty.bilibili.cookie.meta";
@@ -15,6 +15,7 @@ const SESSION_SCHEMA="official-qr-home-v3";
 const UA="Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
 const REQUIRED=["SESSDATA","bili_jct","DedeUserID","buvid3"];
 const COOKIE_ORDER=["SESSDATA","bili_jct","DedeUserID","DedeUserID__ckMd5","sid","buvid3","buvid4","b_nut","b_lsid","_uuid","buvid_fp"];
+const DEVICE_KEYS=["buvid3","buvid4","b_nut","_uuid","buvid_fp","b_lsid"];
 const REQUEST_TIMEOUT=7;
 const POLL_INTERVAL_MS=3000;
 const POLL_MAX_MS=165000;
@@ -23,9 +24,13 @@ const LOCK_TTL_MS=270000;
 let doneCalled=false;
 let lockOwner="";
 let lockHeld=false;
+let requestUA=UA;
 let panel=readPanelState()||localPanel();main().finally(()=>{const writable=!lockHeld||ownsLock();if(lockHeld&&writable)clearPendingQr();releaseLock();if(writable)savePanelState(panel);finish(panel);});
 
-async function main(){try{if(isAutoPanelRefresh()){panel=$persistentStore.read(BAD)?localPanel():(readPanelState()||localPanel());return;}if(isResetRequested()){
+async function main(){try{if(isAutoPanelRefresh()){panel=$persistentStore.read(BAD)?localPanel():(readPanelState()||localPanel());return;}if(typeof $intent==="object"&&$intent&&$intent.parameter&&!isResetRequested()){
+if(!(await acquireLock())){panel=P("⚠️ 登录工具正在运行｜未导入设备信息","clock.fill","#FF9F0A");return;}
+await importBrowserDevice($intent.parameter);return;
+}if(isResetRequested()){
 if(!(await acquireLock())){panel=P("⚠️ 登录工具正在运行｜未重置会话","clock.fill","#FF9F0A");return;}
 resetStoredSession();clearPendingQr();panel=P("已按要求重置 Cookie｜刷新可重新扫码","key.fill","#8E8E93");return;
 }const pending=readPendingQr();if(pending){notifyQr(pending.url,true);panel=P("📱 二维码已重新显示｜请截图后用 Bilibili 扫码","qrcode","#0A84FF");return;}if(!(await acquireLock())){await sleep(220);
@@ -51,6 +56,28 @@ $persistentStore.write("",BAD);clearPendingQr();panel=P("✅ Cookie 已验证｜
 
 function resetStoredSession(){$persistentStore.write("",SESSION);$persistentStore.write("",CK);$persistentStore.write("",META);$persistentStore.write("",BAD);$persistentStore.write("",STATE);if($persistentStore.read(SESSION)||$persistentStore.read(CK)||$persistentStore.read(META)){throw failure("重置失败","旧 Cookie 或验证标记未能彻底清除，本次不创建登录事务。","reset_failed");}}
 
+async function importBrowserDevice(parameter){
+const invalid=()=>failure("设备信息无效","请从本人 Bilibili 浏览器页面运行设备导出快捷指令；只接受设备字段和该浏览器的 User-Agent。","device_import_invalid");
+let input;try{if(typeof parameter!=="string"||parameter.length>16384)throw new Error();input=JSON.parse(parameter);}catch(_){throw invalid();}
+if(!input||input.action!=="import-device"||input.version!==1||!/^https:\/\/(?:www\.|m\.)?bilibili\.com$/.test(input.origin)||typeof input.userAgent!=="string"||input.userAgent.length<20||input.userAgent.length>512||/[^\x20-\x7e]/.test(input.userAgent)||!input.cookies||typeof input.cookies!=="object"||Array.isArray(input.cookies))throw invalid();
+if(Object.keys(input.cookies).some(k=>!DEVICE_KEYS.includes(k)||typeof input.cookies[k]!=="string"||!safeCookieValue(input.cookies[k])))throw invalid();
+if(["buvid3","buvid4","b_nut"].some(k=>!input.cookies[k]))throw invalid();
+const previous=readSession();
+if(!hasVerifiedSession()||/[\x00-\x1f\x7f]/.test(previous.cookie))throw failure("请先扫码登录","没有可供修复的已验证账号会话。请先通过 Cookie Panel 扫码，再导入本人浏览器设备信息。","device_import_no_session");
+const map=parseCookieHeader(previous.cookie);
+// Replace the entire device set, retain every account credential unchanged.
+DEVICE_KEYS.forEach(k=>{delete map[k];if(input.cookies[k])map[k]=safeCookieValue(input.cookies[k]);});
+const cookie=serializeCookies(map);requestUA=input.userAgent;
+const nav=(await getJson(NAV,cookie,true)).body;
+if(!isLoggedIn(nav)||String(nav.data.mid)!==String(previous.meta.uid))throw failure("设备会话验证失败","新设备信息未通过原账号的登录验证；原会话保持不变。","device_import_verification_failed");
+if(!ownsLock()||JSON.stringify(readSession())!==JSON.stringify(previous))throw failure("会话已变化","验证期间会话或运行锁已变化；本次导入未覆盖新会话。","device_import_changed");
+const meta={...previous.meta,version:VER,updatedAt:Date.now(),deviceSource:"browser",deviceImportedAt:Date.now(),deviceOrigin:input.origin,userAgent:requestUA,buvid3Source:"browser"};
+if(!$persistentStore.write(JSON.stringify({version:1,cookie,meta}),SESSION))throw failure("保存失败","浏览器设备信息未保存，原会话保持不变。","device_import_store_failed");
+$persistentStore.write(cookie,CK);$persistentStore.write(JSON.stringify(meta),META);$persistentStore.write("",BAD);
+panel=P("✅ Cookie 已验证｜本人浏览器设备","key.fill","#34C759");
+$notification.post(NAME,"✅ 浏览器设备信息已导入","原账号认证已保留，并使用导入的浏览器身份通过登录验证。请刷新每日签到；是否获得经验仍以官方任务状态为准。");
+}
+
 async function createQrTransaction(){const response=await getJson(GEN,"",false);
 const body=response.body;if(!body||apiCode(body)!==0||!body.data){throw failure("二维码申请失败","Bilibili 未能创建官方扫码登录事务。","qr_generate_failed");}const key=String(body.data.qrcode_key||"").trim();
 const url=String(body.data.url||"").trim();if(key.length!==32){throw failure("二维码申请失败","Bilibili 返回的 qrcode_key 长度异常。","qr_key_invalid");}if(!url){throw failure("二维码申请失败","Bilibili 返回的二维码内容为空。","qr_url_empty");}return{key,url};}
@@ -66,7 +93,7 @@ function notifyQr(url,repeated){let image="";try{image=qr64(url);}catch(_){image
 async function waitForQrLogin(key){const startedAt=Date.now();
 let consecutiveErrors=0;while(Date.now()-startedAt<POLL_MAX_MS){const url=POLL+"?qrcode_key="+encodeURIComponent(key)+"&source=main_mini";
 const response=await request(url,"",false,true,true);if(!response.ok){consecutiveErrors+=1;if(consecutiveErrors>=POLL_MAX_ERRORS){throw failure("登录状态查询失败","连续多次无法查询 Bilibili 扫码状态，请重新获取二维码。","qr_poll_network");}await sleep(POLL_INTERVAL_MS);continue;}consecutiveErrors=0;
-const body=response.body;if(!body||apiCode(body)!==0||!body.data){throw failure("登录状态异常","Bilibili 返回了无法识别的扫码状态。","qr_poll_api");}const status=Number(body.data.code);if(status===0){const map=extractCookies(response.headers,body.data.url);
+const body=response.body;if(!body||apiCode(body)!==0||!body.data){throw failure("登录状态异常","Bilibili 返回了无法识别的扫码状态。","qr_poll_api");}const status=apiCode(body.data);if(status===0){const map=extractCookies(response.headers,body.data.url);
 const missing=["SESSDATA","bili_jct","DedeUserID"].filter(name=>!map[name]);if(missing.length){throw failure("Cookie 不完整","扫码确认成功，但登录响应缺少账号 Cookie。","qr_login_cookie_missing");}return map;}if(status===86038){throw failure("二维码已过期","请重新刷新 Cookie Panel 生成新二维码。","qr_expired");}if(status!==86101&&status!==86090){throw failure("登录状态异常","Bilibili 返回扫码状态码："+safeCode(status)+"。","qr_status_unsupported");}await sleep(POLL_INTERVAL_MS);}throw failure("登录等待超时","未在二维码有效期内完成扫码确认，请重新获取。","qr_timeout");}
 
 async function mergeHomeCookies(map){
@@ -123,7 +150,7 @@ else next=from.split(/[?#]/)[0].replace(/[^/]*$/,"")+value;
 return /^https:\/\/(?:www\.bilibili\.com|m\.bilibili\.com|bilibili\.com)(?::443)?(?:[/?#]|$)/i.test(next)?next:"";
 }
 
-function buildHeaders(cookie){const out={"User-Agent":UA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Referer:HOME};if(cookie)out.Cookie=cookie;return out;}
+function buildHeaders(cookie){const out={"User-Agent":requestUA,Accept:"application/json, text/plain, */*","Accept-Language":"zh-CN,zh-Hans;q=0.9,en;q=0.8",Referer:HOME};if(cookie)out.Cookie=cookie;return out;}
 
 function extractCookies(responseHeaders,fallbackUrl){const map={};
 const add=raw=>{const first=String(raw||"").split(";",1)[0];
@@ -138,7 +165,7 @@ const value=safeCookieValue(decodeURIComponent(part.slice(index+1)));if(COOKIE_O
 function serializeCookies(map){const result=[];
 const used={};COOKIE_ORDER.forEach(name=>{if(map[name]){result.push(name+"="+map[name]);used[name]=true;}});Object.keys(map).sort().forEach(name=>{if(!used[name]&&/^[A-Za-z0-9_.-]{1,64}$/.test(name)&&safeCookieValue(map[name]))result.push(name+"="+map[name]);});return result.join("; ");}
 
-function safeCookieValue(value){const text=String(value||"").trim();return text&&!/[;\r\n]/.test(text)&&text.length<4096?text:"";}
+function safeCookieValue(value){const text=String(value||"").trim();return text&&!/[;\x00-\x1f\x7f]/.test(text)&&text.length<4096?text:"";}
 
 function parseCookieHeader(cookie){const map={};String(cookie||"").split(";").forEach(part=>{const index=part.indexOf("=");if(index>0)map[part.slice(0,index).trim()]=part.slice(index+1);});return map;}
 
@@ -156,18 +183,18 @@ function localPanel(){const current=readSession();const cookie=current.cookie;
 const bad=$persistentStore.read(BAD);
 const meta=current.meta;
 const parsed=parseCookieHeader(cookie);
-const pending=readPendingQr();if(pending)return P("📱 二维码等待扫码｜点刷新可重新显示同一张","qrcode","#0A84FF");if(bad)return P("❌ Cookie 已标记失效｜刷新可重新扫码","key.slash.fill","#FF3B30");if(cookie&&REQUIRED.every(name=>parsed[name])&&meta&&meta.verified===true&&meta.schema===SESSION_SCHEMA&&(meta.buvid3Source==="home"||meta.buvid3Source==="login")){return P("✅ Cookie 已验证｜设备会话 "+(meta.buvid3Source==="home"?"主站":"扫码"),"key.fill","#34C759");}if(cookie)return P("⚠️ 检测到旧或未验证 Cookie｜刷新可安全替换","exclamationmark.triangle.fill","#FF9F0A");return P("点击刷新生成官方二维码｜成功验证后替换会话","key.fill","#8E8E93");}
+const pending=readPendingQr();if(pending)return P("📱 二维码等待扫码｜点刷新可重新显示同一张","qrcode","#0A84FF");if(bad)return P("❌ Cookie 已标记失效｜刷新可重新扫码","key.slash.fill","#FF3B30");if(cookie&&REQUIRED.every(name=>parsed[name])&&meta&&meta.verified===true&&meta.schema===SESSION_SCHEMA&&["home","login","browser"].includes(meta.buvid3Source)){return P("✅ Cookie 已验证｜设备会话 "+(meta.buvid3Source==="browser"?"本人浏览器":meta.buvid3Source==="home"?"主站":"扫码"),"key.fill","#34C759");}if(cookie)return P("⚠️ 检测到旧或未验证 Cookie｜刷新可安全替换","exclamationmark.triangle.fill","#FF9F0A");return P("点击刷新生成官方二维码｜成功验证后替换会话","key.fill","#8E8E93");}
 
 function readPanelState(){const raw=$persistentStore.read(STATE);if(!raw)return null;try{const value=JSON.parse(raw);return value&&value.title&&value.content?value:null;}catch(_){return null;}}
 
 function savePanelState(value){if(!value||!value.title||!value.content)return;$persistentStore.write(JSON.stringify(value),STATE);}
 
-function apiCode(body){if(!body||body.code==null||body.code==="")return null;
+function apiCode(body){if(!body||!["number","string"].includes(typeof body.code)||typeof body.code==="string"&&!body.code.trim())return null;
 const value=Number(body.code);return Number.isFinite(value)?value:null;}
 
 function isLoggedIn(body){return!!(body&&apiCode(body)===0&&body.data&&body.data.isLogin===true);}
 
-function safeCode(value){return Number.isFinite(Number(value))?String(Number(value)):"未知";}
+function safeCode(value){const code=apiCode({code:value});return code===null?"未知":String(code);}
 
 function failure(title,body,code){return{__bettyFailure:true,title,body,code};}
 

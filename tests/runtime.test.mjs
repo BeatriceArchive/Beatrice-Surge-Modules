@@ -1320,3 +1320,201 @@ test('daily: fresh nav key signs watch and recovers only old explicit share reje
   assert.match(rt.notices.at(-1)[2],/分享 ✅ 本次完成/);
   assert.match(rt.notices.at(-1)[2],/余额不足/);
 });
+
+test('daily: delayed watch reuses the opened video and claims VIP after late confirmation', async () => {
+  let shared = false, vipClaims = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/share/add')) { shared = true;return { code: 0 }; }
+    if (q.url.endsWith('/experience/add')) { assert.ok(shared);vipClaims++;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: 50, money: 0, vip: 1, watch: shared, share: shared });
+  } });
+  await rt.start();
+  assert.equal(heartbeats(rt).length, 2, 'a delayed task receipt must not reopen the video');
+  assert.equal(vipClaims, 1, 'claim once after the prerequisite becomes confirmed');
+  assert.match(rt.completions[0].content, /今日任务已完成/);
+  assert.doesNotMatch(rt.notices.at(-1)[2], /异常：|前置观看未完成/);
+});
+
+test('daily: confirmed watch is monotonic within one run despite a stale false reply', async () => {
+  let reads = 0, claims = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/exp/reward')) return { code: 0, data: { login: true, watch: ++reads === 2, share: true, coins: 50 } };
+    if (q.url.endsWith('/experience/add')) { claims++;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: 50, money: 0, vip: 1 });
+  } });
+  await rt.start();assert.equal(claims, 1);
+  assert.match(rt.completions[0].content, /今日任务已完成/);
+});
+
+test('daily: a newly credited coin after initial zero balance is used within the target', async () => {
+  let navReads = 0, spent = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/nav')) return navOK(++navReads === 1 ? 0 : 1 - spent);
+    if (q.url.endsWith('/coin/add')) { spent++;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: spent * 10, money: 0 });
+  } });
+  await rt.start();assert.equal(spent, 1);
+  assert.match(rt.notices.at(-1)[2], /投币 1\/5.*明确成功 1 枚/);
+});
+
+test('daily: final nav login reward is reconciled before reporting incomplete', async () => {
+  let navReads = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/nav')) { navReads++;return navOK(0); }
+    if (q.url.endsWith('/exp/reward')) return { code: 0, data: { login: navReads >= 2, watch: true, share: true, coins: 50 } };
+    return dailyResponse(q, m, { exp: 50 });
+  } });
+  await rt.start();assert.match(rt.completions[0].content, /今日任务已完成/);
+  assert.equal(rt.calls.filter(q => q.method === 'post').length, 0);
+});
+
+test('daily: session change cannot publish the previous account result under the new account', async () => {
+  const store = priorSession(true);let navReads = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store, respond: (q, m) => {
+    if (q.url.endsWith('/nav') && ++navReads === 2) {
+      store.set(SESSION, JSON.stringify({ version: 1, cookie: oldCookie.replace('DedeUserID=42', 'DedeUserID=84'), meta: { ...oldMeta, uid: '84' } }));
+    }
+    return dailyResponse(q, m, { exp: 50, money: 0 });
+  } });
+  await rt.start();assert.equal(store.has(DAILY_STATE), false);
+  assert.match(rt.completions[0].content, /会话已更换/);
+});
+
+const browserUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1';
+const browserDevice = () => ({ action: 'import-device', version: 1, origin: 'https://www.bilibili.com', userAgent: browserUA,
+  cookies: { buvid3: 'browser-device-3', buvid4: 'browser-device-4', b_nut: '1791600000', _uuid: 'browser-uuid' } });
+function deviceImportRuntime(options = {}, payload = browserDevice()) {
+  const rt = runtime('Betty-Bilibili-Cookie', { store: priorSession(true), respond: () => navOK(), ...options });
+  rt.context.$intent = { parameter: typeof payload === 'string' ? payload : JSON.stringify(payload) };
+  rt.context.$trigger = 'intent';delete rt.context.$input;
+  return rt;
+}
+
+test('device import: preserves account credentials, replaces device set and validates matching UA atomically', async () => {
+  const store = priorSession(true), previous = store.get(SESSION);
+  const rt = deviceImportRuntime({ store, respond: q => {
+    assert.equal(store.get(SESSION), previous);
+    assert.equal(q.url, 'https://api.bilibili.com/x/web-interface/nav');
+    assert.equal(q.headers['User-Agent'], browserUA);
+    assert.match(q.headers.Cookie, /SESSDATA=old-fixture; bili_jct=old-csrf; DedeUserID=42/);
+    assert.match(q.headers.Cookie, /buvid4=browser-device-4/);
+    assert.equal(q['auto-redirect'], false);
+    return navOK();
+  } });
+  await rt.start();
+  const session = JSON.parse(store.get(SESSION));
+  assert.equal(session.meta.deviceSource, 'browser');assert.equal(session.meta.userAgent, browserUA);
+  assert.equal(session.meta.uid, '42');assert.doesNotMatch(session.cookie, /old-device/);
+  assert.equal(rt.completions.length, 1);assert.equal(rt.calls.length, 1);
+  assert.match(rt.notices[0][1], /浏览器设备信息已导入/);
+  assert.doesNotMatch(JSON.stringify(rt.notices), /old-fixture|old-csrf|browser-device|browser-uuid/);
+  const auto = runtime('Betty-Bilibili-Cookie', { store, trigger: 'auto-interval' });
+  await auto.start();assert.equal(auto.calls.length, 0);assert.match(auto.completions[0].content, /本人浏览器/);
+  const daily = runtime('Betty-Bilibili-Daily', { store, respond: (q, m) => {
+    assert.equal(q.headers['User-Agent'], browserUA);assert.equal(q.headers.Cookie, session.cookie);
+    return dailyResponse(q, m, { exp: 50, money: 0 });
+  } });
+  await daily.start();assert.match(daily.completions[0].content, /今日任务已完成/);
+});
+
+for (const mode of ['invalid-json', 'foreign-origin', 'missing-device', 'credential-field', 'bad-ua', 'control-cookie', 'array', 'wrong-action']) {
+  test(`device import: invalid input (${mode}) preserves session and never starts QR or sends credentials`, async () => {
+    let payload = browserDevice();
+    if (mode === 'invalid-json') payload = '{';
+    if (mode === 'foreign-origin') payload.origin = 'https://bilibili.com.invalid';
+    if (mode === 'missing-device') delete payload.cookies.buvid4;
+    if (mode === 'credential-field') payload.cookies.SESSDATA = 'must-not-import';
+    if (mode === 'bad-ua') payload.userAgent += '\r\nInjected: yes';
+    if (mode === 'control-cookie') payload.cookies.buvid3 += '\u0000';
+    if (mode === 'array') payload.cookies = [];
+    if (mode === 'wrong-action') payload.action = 'write';
+    const rt = deviceImportRuntime({}, payload), before = rt.store.get(SESSION);
+    await rt.start();assert.equal(rt.store.get(SESSION), before);assert.equal(rt.calls.length, 0);
+    assert.match(rt.notices[0][1], /设备信息无效/);assert.equal(rt.completions.length, 1);
+  });
+}
+
+for (const mode of ['missing-session', 'timeout', 'wrong-uid', 'not-logged-in', 'http-failure', 'malformed-code', 'storage', 'lock-replaced', 'session-replaced']) {
+  test(`device import: failed validation/commit (${mode}) cannot overwrite credentials`, async () => {
+    const store = mode === 'missing-session' ? new Map() : priorSession(true), original = store.get(SESSION);
+    const rt = deviceImportRuntime({ store, failStore: key => mode === 'storage' && key === SESSION, respond: () => {
+      if (mode === 'timeout') return null;
+      if (mode === 'wrong-uid') return { code: 0, data: { isLogin: true, mid: 84 } };
+      if (mode === 'not-logged-in') return { code: 0, data: { isLogin: false, mid: 42 } };
+      if (mode === 'http-failure') return http(503, navOK());
+      if (mode === 'malformed-code') return { ...navOK(), code: false };
+      if (mode === 'lock-replaced') store.set(CK + '.run_lock', JSON.stringify({ owner: 'new-owner', expiresAt: Date.now() + 60000 }));
+      if (mode === 'session-replaced') store.set(SESSION, JSON.stringify({ version: 1, cookie: 'new-session', meta: {} }));
+      return navOK();
+    } });
+    await rt.start();assert.equal(store.get(SESSION), mode === 'session-replaced' ? JSON.stringify({ version: 1, cookie: 'new-session', meta: {} }) : original);
+    assert.ok(rt.calls.every(q => q.method === 'get' && q.url.endsWith('/nav')));
+    assert.doesNotMatch(JSON.stringify(rt.notices), /已导入|old-fixture|old-csrf/);
+  });
+}
+
+test('device export: real Safari script emits only allowlisted local fields and refuses foreign origins', () => {
+  const script = readFileSync(new URL('../scripts/export-bilibili-device.js', import.meta.url), 'utf8');
+  for (const hostname of ['www.bilibili.com', 'm.bilibili.com', 'bilibili.com.invalid']) {
+    const output = [];
+    vm.runInNewContext(script, { location: { hostname, protocol: 'https:', origin: 'https://' + hostname }, navigator: { userAgent: browserUA },
+      document: { cookie: 'SESSDATA=SECRET; bili_jct=CSRF; DedeUserID=42; buvid3=b3; buvid4=b4; b_nut=123; _uuid=abc=def' }, completion: v => output.push(v) });
+    assert.equal(output.length, 1);assert.doesNotMatch(JSON.stringify(output), /SECRET|CSRF|DedeUserID/);
+    if (hostname.endsWith('.invalid')) assert.ok(output[0].error);
+    else { const data = JSON.parse(output[0]);assert.equal(data.cookies._uuid, 'abc=def');assert.equal(data.action, 'import-device'); }
+  }
+});
+
+for (const mode of ['new-device', 'same-device', 'accepted', 'ambiguous', 'http-rejected', 'already-three', 'failed-open', 'cron']) {
+  test(`device repair: one recovery after changed browser context remains bounded (${mode})`, async () => {
+    const saved = exhaustedShare({ version: 5, deviceContext: mode === 'same-device' ? 'browser-context' : 'previous-context',
+      ...(mode === 'accepted' ? { code: 0, requestSucceeded: true } : {}), ...(mode === 'ambiguous' ? { code: null } : {}),
+      ...(mode === 'http-rejected' ? { httpStatus: 403 } : {}), ...(mode === 'already-three' ? { tries: 3 } : {}) });
+    const store = new Map([[SH, JSON.stringify(saved)]]);
+    const options = { store, now: () => sept11, trigger: mode === 'cron' ? 'cron' : 'button', respond: (q, m) => {
+      if (q.url.includes('/view?')) return { code: 0, data: video };
+      if (q.url.includes('/heartbeat')) return mode === 'failed-open' ? null : { code: 0 };
+      if (q.url.endsWith('/share/add')) return { code: -403 };
+      return state(false);
+    } };
+    const rt = runtime('Betty-Bilibili-Daily', options);rt.run("deviceContext='browser-context'");
+    await rt.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+    assert.equal(sharePosts(rt).length, mode === 'new-device' ? 1 : 0);
+    if (mode === 'new-device') assert.equal(JSON.parse(store.get(SH)).tries, 3);
+    const again = runtime('Betty-Bilibili-Daily', options);again.run("deviceContext='another-browser-context'");
+    await again.run("share(['BV1234567890'],null,'42','csrf','cookie')");
+    // Only the unchanged-device case has not consumed its one changed-context recovery.
+    assert.equal(sharePosts(again).length, mode === 'same-device' ? 1 : 0);
+  });
+}
+
+test('daily: final login reconciliation can unlock a late VIP prerequisite exactly once', async () => {
+  let navReads = 0, vipClaims = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/nav')) { navReads++;return navOK(0, 1); }
+    if (q.url.endsWith('/exp/reward')) return { code: 0, data: { login: navReads >= 2, watch: navReads >= 2, share: true, coins: 50 } };
+    if (q.url.endsWith('/experience/add')) { vipClaims++;return { code: 0 }; }
+    return dailyResponse(q, m, { exp: 50, money: 0, vip: 1 });
+  } });
+  await rt.start();assert.equal(vipClaims, 1);assert.match(rt.completions[0].content, /今日任务已完成/);
+});
+
+test('daily: an ambiguous VIP claim is never retried during late reconciliation', async () => {
+  let vipClaims = 0;
+  const rt = runtime('Betty-Bilibili-Daily', { store: priorSession(true), respond: (q, m) => {
+    if (q.url.endsWith('/experience/add')) { vipClaims++;return null; }
+    return dailyResponse(q, m, { exp: 50, money: 0, vip: 1 });
+  } });
+  await rt.start();assert.equal(vipClaims, 1);assert.match(rt.completions[0].content, /部分完成/);
+});
+
+test('daily: in-run task receipts expire across Beijing dates and account changes', () => {
+  let clock = sept11;
+  const rt = runtime('Betty-Bilibili-Daily', { now: () => clock });
+  rt.run("observeTasks({login:true,watch:true,share:true,coins:50},'DedeUserID=42')");
+  assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=42').watch"), true);
+  clock += 86400000;
+  assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=42').watch"), false);
+  rt.run("observeTasks({login:true,watch:true,share:true,coins:50},'DedeUserID=42')");
+  assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=84').watch"), false);
+});
