@@ -1460,10 +1460,31 @@ test('device export: real Safari script emits only allowlisted local fields and 
     vm.runInNewContext(script, { location: { hostname, protocol: 'https:', origin: 'https://' + hostname }, navigator: { userAgent: browserUA },
       document: { cookie: 'SESSDATA=SECRET; bili_jct=CSRF; DedeUserID=42; buvid3=b3; buvid4=b4; b_nut=123; _uuid=abc=def' }, completion: v => output.push(v) });
     assert.equal(output.length, 1);assert.doesNotMatch(JSON.stringify(output), /SECRET|CSRF|DedeUserID/);
-    if (hostname.endsWith('.invalid')) assert.ok(output[0].error);
+    assert.equal(typeof output[0], 'string', 'Shortcuts must receive JSON text on every path');
+    if (hostname.endsWith('.invalid')) assert.deepEqual(JSON.parse(output[0]), { action: 'import-device-error', version: 1, reason: 'foreign-origin' });
     else { const data = JSON.parse(output[0]);assert.equal(data.cookies._uuid, 'abc=def');assert.equal(data.action, 'import-device'); }
   }
 });
+
+test('device export: incomplete device fields return a JSON reason instead of a bare object', () => {
+  const script = readFileSync(new URL('../scripts/export-bilibili-device.js', import.meta.url), 'utf8');
+  const output = [];
+  vm.runInNewContext(script, { location: { hostname: 'www.bilibili.com', protocol: 'https:', origin: 'https://www.bilibili.com' }, navigator: { userAgent: browserUA },
+    document: { cookie: 'SESSDATA=SECRET; buvid3=b3' }, completion: v => output.push(v) });
+  assert.equal(output.length, 1);assert.doesNotMatch(output[0], /SECRET|b3/);
+  assert.deepEqual(JSON.parse(output[0]), { action: 'import-device-error', version: 1, reason: 'incomplete-device' });
+});
+
+for (const [reason, pattern] of [['foreign-origin', /官方网页/], ['incomplete-device', /设备信息尚未完整/], ['unknown-reason', null]]) {
+  test(`device import: exporter refusal (${reason}) shows its fixed cause and keeps the session`, async () => {
+    const rt = deviceImportRuntime({}, { action: 'import-device-error', version: 1, reason }), before = rt.store.get(SESSION);
+    await rt.start();
+    assert.equal(rt.store.get(SESSION), before);assert.equal(rt.calls.length, 0);assert.equal(rt.completions.length, 1);
+    if (pattern) { assert.match(rt.notices[0][1], /设备信息未导入/);assert.match(rt.notices[0][2], pattern); }
+    else assert.match(rt.notices[0][1], /设备信息无效/);
+    assert.doesNotMatch(JSON.stringify(rt.notices), /unknown-reason|old-fixture|old-csrf/);
+  });
+}
 
 for (const mode of ['new-device', 'same-device', 'accepted', 'ambiguous', 'http-rejected', 'already-three', 'failed-open', 'cron']) {
   test(`device repair: one recovery after changed browser context remains bounded (${mode})`, async () => {
@@ -1517,4 +1538,14 @@ test('daily: in-run task receipts expire across Beijing dates and account change
   assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=42').watch"), false);
   rt.run("observeTasks({login:true,watch:true,share:true,coins:50},'DedeUserID=42')");
   assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=84').watch"), false);
+});
+
+for (const trigger of ['editor', 'http-api', '', undefined]) test(`cookie: non-button panel trigger ${String(trigger)} stays local and starts no QR login`, async () => {
+  const store = priorSession(true), previous = store.get(SESSION);
+  const rt = runtime('Betty-Bilibili-Cookie', { store, trigger, respond: q => loginResponse(q.url) });
+  if (trigger === undefined) delete rt.context.$trigger;
+  await rt.start();
+  assert.equal(rt.calls.length, 0);assert.equal(rt.notices.length, 0);
+  assert.equal(store.get(SESSION), previous);assert.equal(store.get(CK + '.pending_qr') || '', '');
+  assert.equal(rt.completions.length, 1);assert.match(rt.completions[0].content, /Cookie 已验证/);
 });

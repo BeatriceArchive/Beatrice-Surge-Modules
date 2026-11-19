@@ -26,6 +26,34 @@ check(moduleFiles.length > 0, 'Modules/ must contain at least one .sgmodule file
 check(scriptFiles.length > 0, 'Scripts/ must contain at least one .js file');
 
 const moduleNames = new Map();
+const moduleVersions = new Map();
+
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function versionDeclaration(version) {
+    return new RegExp(`(?:Version:[ \\t]*|\\b(?:V|VER)[ \\t]*=[ \\t]*["'])${escapeRegExp(version)}(?![0-9.])`);
+}
+
+function readmeSection(file) {
+    const start = README.indexOf(`### ${file}`);
+    if (start < 0) return '';
+    const next = README.indexOf('\n### ', start + 4);
+    const nextH2 = README.indexOf('\n## ', start + 4);
+    const ends = [next, nextH2].filter(index => index >= 0);
+    return README.slice(start, ends.length ? Math.min(...ends) : undefined);
+}
+
+// Version statements in prose docs that must follow the module header.
+const DOC_VERSION_RULES = [
+    ['README.md', /^([0-9]+\.[0-9]+\.[0-9]+) 问题清单/m, 'Betty-Bilibili-Daily'],
+    ['docs/basic-panel.md', /`Betty-Basic-Panel` \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*/, 'Betty-Basic-Panel'],
+    ['docs/bilibili-browser-device.md', /适用版本：Daily \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*/, 'Betty-Bilibili-Daily'],
+    ['docs/bilibili-browser-device.md', /、Cookie \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*/, 'Betty-Bilibili-Cookie'],
+    ['docs/bilibili-browser-device.md', /Daily 面板显示 `v([0-9]+\.[0-9]+\.[0-9]+)`/, 'Betty-Bilibili-Daily'],
+    ['docs/bilibili-daily-audit.md', /^# Bilibili Daily ([0-9]+\.[0-9]+\.[0-9]+) /m, 'Betty-Bilibili-Daily'],
+];
 let localScriptReferenceCount = 0;
 
 for (const file of moduleFiles) {
@@ -117,19 +145,54 @@ for (const file of moduleFiles) {
         );
         if (moduleVersion && existsSync(path.join(ROOT, referencedPath))) {
             const scriptText = readFileSync(path.join(ROOT, referencedPath), 'utf8');
+            // Require an explicit declaration (header "Version: x" or a V / VER constant),
+            // so 1.6.1 cannot be satisfied by an unrelated 1.6.10 or a changelog mention.
             check(
-                scriptText.includes(moduleVersion),
-                `${relative}: version ${moduleVersion} is not present in ${referencedPath}`
+                versionDeclaration(moduleVersion).test(scriptText),
+                `${relative}: ${referencedPath} must declare version ${moduleVersion} ("Version: ${moduleVersion}" or V/VER = "${moduleVersion}")`
             );
         }
     }
 
-    if (moduleVersion) {
+    // The overview table row and install link must name this exact module.
+    const tableRow = README.split(/\r?\n/).find(line => line.startsWith(`| \`${file}\` |`));
+    check(Boolean(tableRow), `${relative}: README module table must contain a row for \`${file}\``);
+    check(
+        README.includes(`(${LOCAL_RAW_PREFIX}Modules/${file})`),
+        `${relative}: README must contain the official install link for ${file}`
+    );
+
+    // A default argument shown in the README must be the one the module actually ships.
+    const moduleArgument = text.match(/argument="([^"]*)"/)?.[1];
+    if (moduleArgument !== undefined) {
+        const section = readmeSection(file);
         check(
-            README.includes(moduleVersion),
-            `${relative}: version ${moduleVersion} is not documented in README.md`
+            section.includes('```text\n' + moduleArgument + '\n```'),
+            `${relative}: README section must show the shipped default argument "${moduleArgument}"`
         );
     }
+
+    if (moduleVersion) {
+        moduleVersions.set(moduleId, moduleVersion);
+        const tableVersion = tableRow?.split('|').map(cell => cell.trim()).filter(Boolean).pop();
+        check(
+            tableVersion === moduleVersion,
+            `${relative}: README module table version (${tableVersion ?? 'missing'}) must equal ${moduleVersion}`
+        );
+    }
+}
+
+for (const [docPath, pattern, moduleId] of DOC_VERSION_RULES) {
+    const expected = moduleVersions.get(moduleId);
+    const absolute = path.join(ROOT, docPath);
+    check(Boolean(expected), `${docPath}: no module version found for ${moduleId}`);
+    check(existsSync(absolute), `${docPath}: file is missing`);
+    if (!expected || !existsSync(absolute)) continue;
+    const found = readFileSync(absolute, 'utf8').match(pattern)?.[1];
+    check(
+        found === expected,
+        `${docPath}: ${moduleId} version statement (${found ?? 'missing'}) must equal module version ${expected}`
+    );
 }
 
 check(localScriptReferenceCount > 0, 'no local raw.githubusercontent.com script references were found');

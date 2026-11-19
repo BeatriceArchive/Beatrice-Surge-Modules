@@ -1,5 +1,9 @@
+/*
+ * Beatrice Surge Modules
+ * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
+ */
 const NAME="贝蒂的哔哩哔哩 Cookie 获取";
-const VER="1.6.0";
+const VER="1.6.1";
 const CK="betty.bilibili.cookie";
 const SESSION="betty.bilibili.cookie.session";
 const META="betty.bilibili.cookie.meta";
@@ -59,6 +63,9 @@ function resetStoredSession(){$persistentStore.write("",SESSION);$persistentStor
 async function importBrowserDevice(parameter){
 const invalid=()=>failure("设备信息无效","请从本人 Bilibili 浏览器页面运行设备导出快捷指令；只接受设备字段和该浏览器的 User-Agent。","device_import_invalid");
 let input;try{if(typeof parameter!=="string"||parameter.length>16384)throw new Error();input=JSON.parse(parameter);}catch(_){throw invalid();}
+// The export shortcut reports its own refusal with a fixed reason code; show the
+// matching fixed text instead of the generic "invalid" message. No free text is echoed.
+if(input&&input.action==="import-device-error"&&input.version===1){const reasons={"foreign-origin":"请在本人 Bilibili 官方网页（www / m.bilibili.com）运行设备导出快捷指令。","incomplete-device":"设备信息尚未完整：请正常打开 Bilibili 主站、等待页面加载后再试；移动站缺少字段时可切换“请求桌面网站”。"};if(Object.prototype.hasOwnProperty.call(reasons,input.reason))throw failure("设备信息未导入",reasons[input.reason]+"原会话保持不变。","device_import_export_"+input.reason);throw invalid();}
 if(!input||input.action!=="import-device"||input.version!==1||!/^https:\/\/(?:www\.|m\.)?bilibili\.com$/.test(input.origin)||typeof input.userAgent!=="string"||input.userAgent.length<20||input.userAgent.length>512||/[^\x20-\x7e]/.test(input.userAgent)||!input.cookies||typeof input.cookies!=="object"||Array.isArray(input.cookies))throw invalid();
 if(Object.keys(input.cookies).some(k=>!DEVICE_KEYS.includes(k)||typeof input.cookies[k]!=="string"||!safeCookieValue(input.cookies[k])))throw invalid();
 if(["buvid3","buvid4","b_nut"].some(k=>!input.cookies[k]))throw invalid();
@@ -213,7 +220,9 @@ function ownsLock(){const current=readLock();return !!(lockHeld&&current&&curren
 
 function isPanelCall(){return typeof $input==="object"&&$input&&$input.purpose==="panel";}
 
-function isAutoPanelRefresh(){return isPanelCall()&&$trigger==="auto-interval";}
+// Only an explicit Panel button press may start or continue a QR login.
+// Any other or missing Panel trigger reads local state, matching Daily.
+function isAutoPanelRefresh(){return isPanelCall()&&(typeof $trigger==="undefined"||$trigger!=="button");}
 
 function P(content,icon,color){return{title:NAME,content,icon,"icon-color":color};}
 
