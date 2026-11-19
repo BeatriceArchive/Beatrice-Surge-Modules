@@ -1460,10 +1460,31 @@ test('device export: real Safari script emits only allowlisted local fields and 
     vm.runInNewContext(script, { location: { hostname, protocol: 'https:', origin: 'https://' + hostname }, navigator: { userAgent: browserUA },
       document: { cookie: 'SESSDATA=SECRET; bili_jct=CSRF; DedeUserID=42; buvid3=b3; buvid4=b4; b_nut=123; _uuid=abc=def' }, completion: v => output.push(v) });
     assert.equal(output.length, 1);assert.doesNotMatch(JSON.stringify(output), /SECRET|CSRF|DedeUserID/);
-    if (hostname.endsWith('.invalid')) assert.ok(output[0].error);
+    assert.equal(typeof output[0], 'string', 'Shortcuts must receive JSON text on every path');
+    if (hostname.endsWith('.invalid')) assert.deepEqual(JSON.parse(output[0]), { action: 'import-device-error', version: 1, reason: 'foreign-origin' });
     else { const data = JSON.parse(output[0]);assert.equal(data.cookies._uuid, 'abc=def');assert.equal(data.action, 'import-device'); }
   }
 });
+
+test('device export: incomplete device fields return a JSON reason instead of a bare object', () => {
+  const script = readFileSync(new URL('../scripts/export-bilibili-device.js', import.meta.url), 'utf8');
+  const output = [];
+  vm.runInNewContext(script, { location: { hostname: 'www.bilibili.com', protocol: 'https:', origin: 'https://www.bilibili.com' }, navigator: { userAgent: browserUA },
+    document: { cookie: 'SESSDATA=SECRET; buvid3=b3' }, completion: v => output.push(v) });
+  assert.equal(output.length, 1);assert.doesNotMatch(output[0], /SECRET|b3/);
+  assert.deepEqual(JSON.parse(output[0]), { action: 'import-device-error', version: 1, reason: 'incomplete-device' });
+});
+
+for (const [reason, pattern] of [['foreign-origin', /官方网页/], ['incomplete-device', /设备信息尚未完整/], ['unknown-reason', null]]) {
+  test(`device import: exporter refusal (${reason}) shows its fixed cause and keeps the session`, async () => {
+    const rt = deviceImportRuntime({}, { action: 'import-device-error', version: 1, reason }), before = rt.store.get(SESSION);
+    await rt.start();
+    assert.equal(rt.store.get(SESSION), before);assert.equal(rt.calls.length, 0);assert.equal(rt.completions.length, 1);
+    if (pattern) { assert.match(rt.notices[0][1], /设备信息未导入/);assert.match(rt.notices[0][2], pattern); }
+    else assert.match(rt.notices[0][1], /设备信息无效/);
+    assert.doesNotMatch(JSON.stringify(rt.notices), /unknown-reason|old-fixture|old-csrf/);
+  });
+}
 
 for (const mode of ['new-device', 'same-device', 'accepted', 'ambiguous', 'http-rejected', 'already-three', 'failed-open', 'cron']) {
   test(`device repair: one recovery after changed browser context remains bounded (${mode})`, async () => {
