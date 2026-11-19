@@ -13,7 +13,7 @@
 | `Beatrice-Surge-System.sgmodule` | Surge 网络基线覆盖 | 稳定 |
 | `Betty-Basic-Panel.sgmodule` | 单一网络信息 Panel | 1.5.3 |
 | `Betty-Bilibili-Daily.sgmodule` | Bilibili 每日等级经验任务 | 1.14.0 |
-| `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.6.0 |
+| `Betty-Bilibili-Cookie.sgmodule` | Bilibili 官方二维码登录 / 本地会话建立 | 1.6.1 |
 
 ### 安装地址
 
@@ -124,9 +124,11 @@ Daily 不监听 Cookie，也不需要 MITM。
 4. 校验 `SESSDATA`、`bili_jct`、`DedeUserID`、`buvid3` 与 `/nav` 登录 UID。
 5. 全部成功后才一次性替换旧会话。
 
-遇到扫码认证有效但分享持续 `-403` 时，Cookie 1.6.0 提供[本人浏览器设备修复](docs/bilibili-browser-device.md)：通过本机 Safari 快捷指令导入设备字段与 User-Agent，验证原账号后原子保存。不会导出账号登录凭据，不要求 MITM，也不使用随机指纹模板。导入成功不等于分享已到账。
+遇到扫码认证有效但分享持续 `-403` 时，Cookie 自 1.6.0 起提供[本人浏览器设备修复](docs/bilibili-browser-device.md)：通过本机 Safari 快捷指令导入设备字段与 User-Agent，验证原账号后原子保存。不会导出账号登录凭据，不要求 MITM，也不使用随机指纹模板。导入成功不等于分享已到账。
 
 新登录失败不会删除原有已验证会话。二维码仍有效时再次刷新会重新显示同一张二维码，而不是创建第二个事务。
+
+1.6.1 起，只有 Panel 按钮点击才会创建 / 继续二维码登录事务；自动刷新以及其他或缺失的 Panel 触发来源只读取本地状态，与 Daily 的手动判定一致。
 
 Cookie 只保存在 Surge 本地持久化存储；不写入仓库、不发送给第三方服务。QR、主站补全和验证都按 Surge 当前规则出站，不强制 DIRECT，也不使用 MITM、CA 或 HTTPS 解密。
 
@@ -165,6 +167,13 @@ Bilibili 会话恢复、分享 `-403` 调查、PC-client 请求依据与真实�
 ```bash
 node scripts/validate-modules.mjs
 node --test tests/*.test.mjs
+for script in Scripts/*.js scripts/*.js; do node --check "$script"; done
+```
+
+如需在本地复现 Config 契约检查，先把 `Beatrice-Surge-Config` 检出到 workflow 固定的提交，再运行：
+
+```bash
+node scripts/validate-config-contract.mjs Beatrice-Surge-Config/Beatrice-Surge.conf Modules/Beatrice-Surge-System.sgmodule
 ```
 
 行为测试运行在隔离的 mock Surge 环境：

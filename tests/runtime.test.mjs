@@ -1518,3 +1518,13 @@ test('daily: in-run task receipts expire across Beijing dates and account change
   rt.run("observeTasks({login:true,watch:true,share:true,coins:50},'DedeUserID=42')");
   assert.equal(rt.run("observeTasks({login:false,watch:false,share:false,coins:0},'DedeUserID=84').watch"), false);
 });
+
+for (const trigger of ['editor', 'http-api', '', undefined]) test(`cookie: non-button panel trigger ${String(trigger)} stays local and starts no QR login`, async () => {
+  const store = priorSession(true), previous = store.get(SESSION);
+  const rt = runtime('Betty-Bilibili-Cookie', { store, trigger, respond: q => loginResponse(q.url) });
+  if (trigger === undefined) delete rt.context.$trigger;
+  await rt.start();
+  assert.equal(rt.calls.length, 0);assert.equal(rt.notices.length, 0);
+  assert.equal(store.get(SESSION), previous);assert.equal(store.get(CK + '.pending_qr') || '', '');
+  assert.equal(rt.completions.length, 1);assert.match(rt.completions[0].content, /Cookie 已验证/);
+});

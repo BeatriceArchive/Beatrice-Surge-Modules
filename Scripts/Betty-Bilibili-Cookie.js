@@ -1,5 +1,9 @@
+/*
+ * Beatrice Surge Modules
+ * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
+ */
 const NAME="贝蒂的哔哩哔哩 Cookie 获取";
-const VER="1.6.0";
+const VER="1.6.1";
 const CK="betty.bilibili.cookie";
 const SESSION="betty.bilibili.cookie.session";
 const META="betty.bilibili.cookie.meta";
@@ -213,7 +217,9 @@ function ownsLock(){const current=readLock();return !!(lockHeld&&current&&curren
 
 function isPanelCall(){return typeof $input==="object"&&$input&&$input.purpose==="panel";}
 
-function isAutoPanelRefresh(){return isPanelCall()&&$trigger==="auto-interval";}
+// Only an explicit Panel button press may start or continue a QR login.
+// Any other or missing Panel trigger reads local state, matching Daily.
+function isAutoPanelRefresh(){return isPanelCall()&&(typeof $trigger==="undefined"||$trigger!=="button");}
 
 function P(content,icon,color){return{title:NAME,content,icon,"icon-color":color};}
 
