@@ -1,3 +1,7 @@
+/*
+ * Beatrice Surge Modules
+ * Copyright (c) 2026 BeatriceArchive. See repository LICENSE.
+ */
 // Run in Safari through Shortcuts' "Run JavaScript on Web Page" action.
 // Send the result directly to Surge's Run Script action (Cookie tool parameter).
 // Read only device identifiers. Never export SESSDATA, bili_jct or account IDs.

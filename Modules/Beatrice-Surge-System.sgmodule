@@ -1,5 +1,6 @@
 #!name=贝蒂的 Surge 托管设置
 #!desc=Surge 托管配置系统覆盖：VIF 接管、防泄漏与网络行为调整
+#!author=BeatriceArchive
 #!system=ios
 # Copyright (c) 2026 BeatriceArchive
 # Personal use permitted. Redistribution, rebranding, or derivative publication requires prior permission.
