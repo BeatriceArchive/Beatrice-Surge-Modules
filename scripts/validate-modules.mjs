@@ -124,10 +124,19 @@ for (const file of moduleFiles) {
         }
     }
 
+    // The overview table row and install link must name this exact module.
+    const tableRow = README.split(/\r?\n/).find(line => line.startsWith(`| \`${file}\` |`));
+    check(Boolean(tableRow), `${relative}: README module table must contain a row for \`${file}\``);
+    check(
+        README.includes(`(${LOCAL_RAW_PREFIX}Modules/${file})`),
+        `${relative}: README must contain the official install link for ${file}`
+    );
+
     if (moduleVersion) {
+        const tableVersion = tableRow?.split('|').map(cell => cell.trim()).filter(Boolean).pop();
         check(
-            README.includes(moduleVersion),
-            `${relative}: version ${moduleVersion} is not documented in README.md`
+            tableVersion === moduleVersion,
+            `${relative}: README module table version (${tableVersion ?? 'missing'}) must equal ${moduleVersion}`
         );
     }
 }
