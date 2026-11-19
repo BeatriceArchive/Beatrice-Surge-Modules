@@ -17,17 +17,20 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Checkout pinned public Surge Config contract
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           repository: BeatriceArchive/Beatrice-Surge-Config
           ref: 63b848b91d527b3c75e45f1701968a5dbe4babe9
           path: Beatrice-Surge-Config
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
 
@@ -41,4 +44,4 @@ jobs:
         run: node --test tests/*.test.mjs
 
       - name: Check script syntax
-        run: for script in Scripts/*.js; do node --check "$script"; done
+        run: for script in Scripts/*.js scripts/*.js; do node --check "$script"; done
